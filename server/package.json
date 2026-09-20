@@ -1,0 +1,15 @@
+{
+  "name": "xiaoyi-restaurant-agent-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "小艺餐厅 Agent 本地演示服务与预置商家数据",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  }
+}

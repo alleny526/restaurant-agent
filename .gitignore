@@ -1,0 +1,11 @@
+.idea/
+.hvigor/
+**/build/
+**/.test/
+**/node_modules/
+*.iml
+local.properties
+AppScope/resources/base/profile/agconnect-services.json
+signing-config.json5
+server/.env
+server/data/*.json

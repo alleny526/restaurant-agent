@@ -1,0 +1,244 @@
+openapi: 3.0.3
+info:
+  title: 小艺餐厅 Agent 云插件
+  version: 1.1.0
+  description: 从真实商家数据库检索并保持选店、到店、菜单确认、用餐完成和评价上下文的工具集合。
+servers:
+  - url: https://YOUR_API_DOMAIN.example.com
+security:
+  - ApiKeyAuth: []
+paths:
+  /xiaoyi/tools/search_restaurants:
+    post:
+      operationId: searchRestaurants
+      summary: 按自然语言需求搜索餐厅
+      description: 将菜系、口味、预算、营业状态作为约束，从数据库返回至多5家真实商家及可追溯推荐理由。不得用该工具之外的信息补造商家事实。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRestaurantsRequest'
+      responses:
+        '200':
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchRestaurantsResponse'
+  /xiaoyi/tools/select_restaurant:
+    post:
+      operationId: selectRestaurant
+      summary: 为当前会话选择餐厅
+      description: 选择前必须使用 searchRestaurants 获得真实 restaurantId；成功后建立就餐上下文。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SelectRestaurantRequest'
+      responses:
+        '200':
+          description: 已建立餐厅上下文
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /xiaoyi/tools/submit_review:
+    post:
+      operationId: submitReview
+      summary: 将用户评价写入正确的餐厅
+      description: 仅在用户明确完成就餐并确认评价内容后调用；服务端会脱敏手机号和邮箱。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitReviewRequest'
+      responses:
+        '200':
+          description: 评价已写入
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /xiaoyi/tools/arrive:
+    post:
+      operationId: arriveRestaurant
+      summary: 标记当前会话已抵达餐厅
+      description: 仅在已使用 selectRestaurant 建立餐厅上下文后调用；返回数据库菜单或菜单上传引导。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationRequest'
+      responses:
+        '200':
+          description: 已进入到店阶段
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /xiaoyi/tools/submit_menu:
+    post:
+      operationId: submitRecognizedMenu
+      summary: 提交并确认菜单图片识别结果
+      description: 小艺从用户上传的菜单图片中提取字段后调用。必须保留低置信度标记，不得凭常识补全菜名、价格或食材。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitMenuRequest'
+      responses:
+        '200':
+          description: 已保存本次会话菜单并生成保守的菜品建议
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /xiaoyi/tools/finish_dining:
+    post:
+      operationId: finishDining
+      summary: 标记当前会话就餐完毕
+      description: 进入评价阶段；未选择餐厅时不得调用。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationRequest'
+      responses:
+        '200':
+          description: 已进入评价阶段
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    SearchRestaurantsRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          maxLength: 500
+          description: 用户原始就餐需求，例如“今天想吃清淡的江浙菜，人均100以内”。
+        userId:
+          type: string
+          maxLength: 128
+          description: 已授权时传入用户标识，用于应用可选偏好；未授权可省略。
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 5
+          default: 5
+    SearchRestaurantsResponse:
+      type: object
+      required: [intent, restaurants]
+      properties:
+        intent:
+          type: object
+          additionalProperties: true
+        restaurants:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/Restaurant'
+    Restaurant:
+      type: object
+      required: [id, name, address, cuisines, tags, averagePrice, rating, isOpen, recommendationReason]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        address: { type: string }
+        distanceMeters: { type: integer }
+        cuisines: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        averagePrice: { type: number }
+        rating: { type: number }
+        isOpen: { type: boolean }
+        recommendationReason: { type: string }
+    SelectRestaurantRequest:
+      type: object
+      required: [conversationId, restaurantId]
+      properties:
+        conversationId:
+          type: string
+          description: 小艺会话标识，同一次就餐链路保持不变。
+        restaurantId:
+          type: string
+          description: searchRestaurants 返回的餐厅 ID。
+        userId: { type: string }
+    ConversationRequest:
+      type: object
+      required: [conversationId]
+      properties:
+        conversationId:
+          type: string
+          maxLength: 128
+          description: 小艺会话标识，同一次就餐链路必须保持不变。
+        userId:
+          type: string
+          maxLength: 128
+    SubmitMenuRequest:
+      type: object
+      required: [conversationId, items]
+      properties:
+        conversationId:
+          type: string
+          maxLength: 128
+        userId:
+          type: string
+          maxLength: 128
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/MenuItem'
+        lowConfidenceFields:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+    MenuItem:
+      type: object
+      required: [name, confidence]
+      properties:
+        id: { type: string, maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        category: { type: string, maxLength: 40 }
+        price: { type: number, minimum: 0, maximum: 100000 }
+        ingredients:
+          type: array
+          maxItems: 30
+          items: { type: string, maxLength: 50 }
+        tags:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 30 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+    SubmitReviewRequest:
+      type: object
+      required: [conversationId, restaurantId, text]
+      properties:
+        conversationId: { type: string }
+        restaurantId: { type: string }
+        userId: { type: string }
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1000

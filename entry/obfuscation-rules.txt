@@ -1,0 +1,3 @@
+# Keep cloud DTO names for JSON serialization.
+-keep class com.example.xiaoyirestaurant.** { *; }
+
