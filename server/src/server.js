@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { createRestaurantServer } from './app.js';
 
 const host = process.env.HOST ?? '0.0.0.0';
@@ -5,7 +6,7 @@ const port = Number(process.env.PORT ?? 8787);
 const { server } = await createRestaurantServer();
 
 server.listen(port, host, () => {
-  console.log(`Xiaoyi Restaurant Agent server listening on http://${host}:${port}`);
+  console.log(`Restaurant Agent server listening on http://${host}:${port}`);
 });
 
 function shutdown(signal) {

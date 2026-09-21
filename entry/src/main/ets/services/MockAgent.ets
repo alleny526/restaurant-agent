@@ -8,39 +8,7 @@ import {
   SessionState
 } from '../model/Models';
 
-const MENU_JIANGNAN: MenuItem[] = [
-  { id: 'm-101', name: '清蒸鲈鱼', category: '江鲜', price: 88, ingredients: ['鲈鱼', '葱', '姜'], confidence: 0.98 },
-  { id: 'm-102', name: '龙井虾仁', category: '热菜', price: 78, ingredients: ['虾仁', '龙井茶'], confidence: 0.97 },
-  { id: 'm-103', name: '莼菜豆腐羹', category: '汤羹', price: 36, ingredients: ['莼菜', '豆腐'], confidence: 0.94 }
-];
-
-const MENU_VEGAN: MenuItem[] = [
-  { id: 'm-201', name: '菌菇时蔬煲', category: '热菜', price: 48, ingredients: ['香菇', '口蘑', '青菜'], confidence: 0.96 },
-  { id: 'm-202', name: '桂花糯米藕', category: '凉菜', price: 32, ingredients: ['莲藕', '糯米', '桂花'], confidence: 0.93 }
-];
-
-const RESTAURANTS: Restaurant[] = [
-  {
-    id: 'demo-r-001', name: '江南小馆（演示）', cuisine: '江浙菜', tags: ['清淡', '江鲜', '家庭聚餐'],
-    address: '示例市滨江路 18 号', distanceKm: 1.2, pricePerPerson: 96, rating: 4.7, open: true,
-    reason: '江浙风味与清淡偏好匹配，菜单中有多道少油蒸菜。', menuAvailable: true, menu: MENU_JIANGNAN
-  },
-  {
-    id: 'demo-r-002', name: '荷风素宴（演示）', cuisine: '素食', tags: ['清淡', '素食', '安静'],
-    address: '示例市学府街 6 号', distanceKm: 2.0, pricePerPerson: 72, rating: 4.6, open: true,
-    reason: '菜品整体清淡，适合希望控制油盐或偏爱蔬食的用户。', menuAvailable: true, menu: MENU_VEGAN
-  },
-  {
-    id: 'demo-r-003', name: '湖畔家宴（演示）', cuisine: '杭帮菜', tags: ['本帮', '时令', '包间'],
-    address: '示例市湖滨南路 33 号', distanceKm: 2.8, pricePerPerson: 128, rating: 4.8, open: true,
-    reason: '杭帮菜契合江浙诉求，近期评价中清淡菜品反馈较好。', menuAvailable: false, menu: []
-  },
-  {
-    id: 'demo-r-004', name: '邻里蒸味（演示）', cuisine: '家常菜', tags: ['蒸菜', '少油', '性价比'],
-    address: '示例市人民路 52 号', distanceKm: 3.4, pricePerPerson: 58, rating: 4.5, open: true,
-    reason: '蒸菜与少油标签符合清淡需求，人均价格更友好。', menuAvailable: false, menu: []
-  }
-];
+const RESTAURANTS: Restaurant[] = [];
 
 export class MockAgent {
   static restaurants(): Restaurant[] {
@@ -56,7 +24,7 @@ export class MockAgent {
     };
 
     if (request.action === 'discover' || request.action === 'recommend') {
-      return MockAgent.response('我根据你的口味与当前条件，从演示商家库筛选了 4 家。推荐理由只使用库内已有字段。',
+      return MockAgent.response('当前没有可用的本地餐厅数据，请连接云端商家库后重试。',
         state, RESTAURANTS, [], [], false);
     }
 
@@ -161,8 +129,8 @@ export class MockAgent {
       return MockAgent.response(`${reply}模型识别可能遗漏过敏原，请以餐厅实际说明为准。`, state, [], menu,
         MockAgent.recommendDishes(menu, request.profile.dietaryRestrictions), false);
     }
-    return MockAgent.response('我把你的描述转换成了菜系、口味与距离条件。以下结果来自演示商家库，你可以查看详情或直接选择。',
-      state, RESTAURANTS.slice(0, 3), [], [], false);
+    return MockAgent.response('当前没有可用的本地餐厅数据，请连接云端商家库后重试。',
+      state, [], [], [], false);
   }
 
   private static recommendDishes(menu: MenuItem[], restrictions: string[]): DishRecommendation[] {

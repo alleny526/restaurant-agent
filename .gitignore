@@ -9,3 +9,6 @@ AppScope/resources/base/profile/agconnect-services.json
 signing-config.json5
 server/.env
 server/data/*.json
+server/data/*.sqlite
+server/data/*.sqlite-*
+artifacts/

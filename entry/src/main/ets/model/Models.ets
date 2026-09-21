@@ -34,9 +34,21 @@ export interface Restaurant {
   pricePerPerson: number;
   rating: number;
   open: boolean;
+  openStatusKnown?: boolean;
+  openingHours?: string;
+  source?: string;
   reason: string;
   menuAvailable: boolean;
   menu: MenuItem[];
+  reviews?: RestaurantReview[];
+}
+
+export interface RestaurantReview {
+  id: string;
+  rating: number;
+  text: string;
+  tags: string[];
+  createdAt: string;
 }
 
 export interface DishRecommendation {
@@ -67,15 +79,23 @@ export interface UserProfile {
   personalizationEnabled: boolean;
 }
 
+export interface UserLocation {
+  longitude: number;
+  latitude: number;
+}
+
 export interface SessionState {
   sessionId: string;
   stage: MealStage;
   selectedRestaurantId: string;
   userId: string;
+  menuStatus?: string;
+  menuVersionId?: string;
 }
 
 export interface AgentRequest {
   action: string;
+  clientRequestId: string;
   message: string;
   restaurantId: string;
   menuImages: MenuImage[];
@@ -83,6 +103,9 @@ export interface AgentRequest {
   rating: number;
   state: SessionState;
   profile: UserProfile;
+  location?: UserLocation;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface AgentResponse {
@@ -92,4 +115,8 @@ export interface AgentResponse {
   recognizedMenu: MenuItem[];
   dishRecommendations: DishRecommendation[];
   reviewSaved: boolean;
+  modelUsed?: boolean;
+  selectedRestaurant?: Restaurant;
+  hasMore?: boolean;
+  nextPage?: number;
 }

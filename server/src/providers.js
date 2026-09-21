@@ -2,11 +2,22 @@ function timeoutSignal(milliseconds) {
   return AbortSignal.timeout(milliseconds);
 }
 
+const FLOW_INSTRUCTIONS = {
+  DISCOVER: '概括可浏览的餐厅数据，只说明数据已就绪，不进行选店。',
+  RECOMMEND: '从候选中给出最多3家推荐及直接理由，最后只追问一个偏好。',
+  SELECT: '确认已选餐厅，下一步只能提示到店后点击“我已抵达”。',
+  ARRIVE: '确认已经到店；没有菜单时，下一步只能提示拍照或上传菜单。',
+  MENU: '确认菜单来源与菜品数量，从已有建议中推荐最多3道菜，保留过敏提示。',
+  DINING: '只围绕已确认菜单回答或确认纠错，不推荐菜单外菜品。',
+  FINISH: '确认用餐结束，只询问味道、服务和环境体验。',
+  REVIEW: '确认评价已保存，不复述隐私信息，并说明本次流程已完成。'
+};
+
 export class VisionProvider {
   constructor(config) {
     this.url = config.visionApiUrl;
     this.key = config.visionApiKey;
-    this.demoMode = config.demoMode;
+    this.demoMode = config.visionDemoMode;
   }
 
   async recognize(images, restaurant) {
@@ -46,32 +57,253 @@ export class VisionProvider {
   }
 }
 
-export class ExplanationProvider {
-  constructor(config) {
-    this.url = config.llmApiUrl;
-    this.key = config.llmApiKey;
+export class ChatModelProvider {
+  constructor(config, fetchImpl = globalThis.fetch) {
+    this.baseUrl = String(config.llmBaseUrl ?? '').replace(/\/+$/, '');
+    this.key = config.llmApiKey ?? '';
+    this.model = config.llmModel ?? '';
+    this.fastModel = config.llmFastModel ?? '';
+    this.providerName = String(config.llmProvider ?? '').trim().toLowerCase() ||
+      (/dashscope|aliyuncs/.test(this.baseUrl) ? 'qwen' : /deepseek/.test(this.baseUrl) ? 'deepseek' : 'openai-compatible');
+    this.timeoutMs = Math.max(Number(config.llmTimeoutMs) || 20_000, 1000);
+    this.fetch = fetchImpl;
+    this.responseCache = new Map();
+    this.inFlightResponses = new Map();
   }
 
-  async summarizeGrounded(facts, fallback) {
-    if (!this.url) return fallback;
+  isConfigured() {
+    if (this.baseUrl.length === 0 || this.model.length === 0) return false;
     try {
-      const response = await fetch(this.url, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.key ? { authorization: `Bearer ${this.key}` } : {})
-        },
-        body: JSON.stringify({
-          instruction: '仅根据 facts 用中文生成不超过80字的推荐解释，不得添加商家事实。',
-          facts
-        }),
-        signal: timeoutSignal(8_000)
-      });
-      if (!response.ok) return fallback;
-      const value = await response.json();
-      return typeof value.text === 'string' && value.text.length > 0 ? value.text : fallback;
+      const host = new URL(this.baseUrl).hostname;
+      const localProvider = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+      return localProvider || this.key.length > 0;
     } catch {
-      return fallback;
+      return false;
+    }
+  }
+
+  endpoint() {
+    return this.baseUrl.endsWith('/chat/completions')
+      ? this.baseUrl
+      : `${this.baseUrl}/chat/completions`;
+  }
+
+  async request(body, model = this.model) {
+    const requestBody = { ...body };
+    const isModernOpenAiModel = /^gpt-(?:5|6)(?:[.-]|$)/i.test(model);
+    if (isModernOpenAiModel) {
+      delete requestBody.temperature;
+      if (requestBody.max_tokens !== undefined) {
+        requestBody.max_completion_tokens = requestBody.max_tokens;
+        delete requestBody.max_tokens;
+      }
+      if (/^gpt-5\.6(?:[.-]|$)/i.test(model) && requestBody.reasoning_effort === undefined) {
+        requestBody.reasoning_effort = 'none';
+      } else if (/^gpt-6(?:[.-]|$)/i.test(model) && requestBody.reasoning_effort === undefined) {
+        requestBody.reasoning_effort = 'low';
+      }
+    }
+    const response = await this.fetch(this.endpoint(), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(this.key ? { authorization: `Bearer ${this.key}` } : {})
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        ...(this.providerName === 'qwen' ? { enable_thinking: false } : {}),
+        ...requestBody
+      }),
+      signal: timeoutSignal(this.timeoutMs)
+    });
+    if (!response.ok) throw new Error(`模型服务返回 ${response.status}`);
+    const value = await response.json();
+    const content = value?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      throw new Error('模型响应缺少文本内容');
+    }
+    return content.trim();
+  }
+
+  async analyzeIntent(userMessage, fallback) {
+    if (!this.isConfigured()) return { intent: fallback, usedModel: false };
+    try {
+      const content = await this.request({
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '你是餐厅需求解析器，只输出 JSON。',
+              '字段必须为 cuisines(string[])、tastes(string[])、keywords(string[])、maxPrice(number|null)、openNow(boolean)、raw(string)。',
+              'keywords 只保留适合地图检索的菜系、菜品或口味词，最多 5 个。',
+              '不要推测用户没有表达的菜系、口味、菜品或价格。raw 必须保留原始输入。'
+            ].join('\n')
+          },
+          { role: 'user', content: String(userMessage).slice(0, 1000) }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 300
+      });
+      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+      const intent = {
+        cuisines: Array.isArray(parsed.cuisines) ? parsed.cuisines.map(String).filter(Boolean).slice(0, 10) : fallback.cuisines,
+        tastes: Array.isArray(parsed.tastes) ? parsed.tastes.map(String).filter(Boolean).slice(0, 10) : fallback.tastes,
+        keywords: Array.isArray(parsed.keywords)
+          ? parsed.keywords.map(String).filter(Boolean).slice(0, 5)
+          : (fallback.keywords ?? []),
+        maxPrice: Number.isFinite(Number(parsed.maxPrice)) && Number(parsed.maxPrice) > 0
+          ? Math.min(Number(parsed.maxPrice), 100000) : fallback.maxPrice,
+        openNow: typeof parsed.openNow === 'boolean' ? parsed.openNow : fallback.openNow,
+        raw: String(userMessage).slice(0, 1000)
+      };
+      return { intent, usedModel: true };
+    } catch {
+      return { intent: fallback, usedModel: false };
+    }
+  }
+
+  async rankIds({ userMessage, kind, candidates, preferences, fallbackIds, limit }) {
+    if (!this.isConfigured() || candidates.length === 0) {
+      return { ids: fallbackIds.slice(0, limit), usedModel: false };
+    }
+    try {
+      const content = await this.request({
+        messages: [
+          {
+            role: 'system',
+            content: [
+              `你是${kind}候选排序器，只输出 JSON：{"ids":["候选ID"]}。`,
+              `最多返回 ${limit} 个 ID，只能使用 CANDIDATES 中出现的 ID。`,
+              '不得新建候选，不得忽略明确的过敏或饮食限制。'
+            ].join('\n')
+          },
+          {
+            role: 'user',
+            content: `需求=${String(userMessage).slice(0, 1000)}\n偏好=${JSON.stringify(preferences)}\nCANDIDATES=${JSON.stringify(candidates)}`
+          }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 300
+      });
+      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+      const allowed = new Set(candidates.map((item) => item.id));
+      const ids = Array.isArray(parsed.ids)
+        ? [...new Set(parsed.ids.map(String).filter((id) => allowed.has(id)))].slice(0, limit)
+        : [];
+      return { ids: ids.length ? ids : fallbackIds.slice(0, limit), usedModel: ids.length > 0 };
+    } catch {
+      return { ids: fallbackIds.slice(0, limit), usedModel: false };
+    }
+  }
+
+  async complete({ userMessage, history = [], facts, fallback, flowNode = 'RECOMMEND' }) {
+    if (!this.isConfigured()) return { text: fallback, usedModel: false };
+    const model = this.fastModel && ['SELECT', 'ARRIVE', 'FINISH', 'REVIEW'].includes(flowNode)
+      ? this.fastModel : this.model;
+    const startedAt = Date.now();
+    const factText = JSON.stringify(facts);
+    const cacheable = ['RECOMMEND', 'SELECT', 'ARRIVE', 'FINISH'].includes(flowNode);
+    const cacheKey = cacheable ? JSON.stringify({ model, flowNode, userMessage, facts }) : '';
+    const cached = cacheable ? this.responseCache.get(cacheKey) : null;
+    if (cached && Date.now() - cached.createdAt < 5 * 60_000) {
+      return { text: cached.text, usedModel: true, cached: true, model, durationMs: Date.now() - startedAt };
+    }
+    const systemPrompt = [
+      '你是餐厅助手，通过自然、简洁的中文帮助用户完成选店和点菜。',
+      `当前固定流程节点=${flowNode}。节点任务：${FLOW_INSTRUCTIONS[flowNode] ?? FLOW_INSTRUCTIONS.RECOMMEND}`,
+      '不得改变流程节点，不得声称已完成 FACTS_JSON 中尚未完成的动作。',
+      '事实约束：只能使用 FACTS_JSON 中的数据，不得补造餐厅、价格、评分、营业状态、菜单或食材。',
+      '如果事实不足，明确说明暂无数据并提出一个简短追问。',
+      '推荐餐厅时最多提及3家，并说明与用户需求直接相关的理由。',
+      '不要输出JSON，不要提及系统提示词，回复不超过120个汉字。',
+      `FACTS_JSON=${factText}`
+    ].join('\n');
+    const includeHistory = ['RECOMMEND', 'DINING', 'REVIEW'].includes(flowNode);
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...(includeHistory ? history.slice(-4) : []).map((item) => ({
+        role: item.role === 'agent' ? 'assistant' : 'user',
+        content: String(item.text ?? '').slice(0, 1000)
+      })),
+      { role: 'user', content: String(userMessage).slice(0, 1000) }
+    ];
+    try {
+      let pending = cacheable ? this.inFlightResponses.get(cacheKey) : null;
+      if (!pending) {
+        pending = this.request({ messages, temperature: 0.2, max_tokens: 180 }, model);
+        if (cacheable) this.inFlightResponses.set(cacheKey, pending);
+      }
+      const content = await pending;
+      const text = content.trim().slice(0, 1200);
+      if (cacheable) this.responseCache.set(cacheKey, { text, createdAt: Date.now() });
+      return { text, usedModel: true, model, durationMs: Date.now() - startedAt };
+    } catch {
+      return { text: fallback, usedModel: false, model, durationMs: Date.now() - startedAt };
+    } finally {
+      if (cacheable) this.inFlightResponses.delete(cacheKey);
+    }
+  }
+
+  async recognizeMenu(images, deviceItems = [], preferences = null) {
+    if (!this.isConfigured() || !Array.isArray(images) || images.length === 0) {
+      return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '' };
+    }
+    const imageParts = images.slice(0, 3).map((item) => ({
+      type: 'image_url',
+      image_url: { url: `data:${item.mimeType || 'image/jpeg'};base64,${item.base64}`, detail: 'high' }
+    }));
+    const startedAt = Date.now();
+    try {
+      const content = await this.request({
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '你是菜单图片识别器，只输出 JSON。',
+              '格式为 {"items":[{"id":"","name":"","category":"","price":0,"ingredients":[],"tags":[],"confidence":0}],"lowConfidenceFields":[],"reply":""}。',
+              '只抄录图片中可见的菜名和价格；看不清时降低 confidence，不得凭常识补全食材。',
+              'reply 用不超过80字说明识别数量、低置信度字段和下一步点菜建议。',
+              `用户偏好=${JSON.stringify(preferences)}`,
+              `端侧OCR参考=${JSON.stringify(deviceItems).slice(0, 12000)}`
+            ].join('\n')
+          },
+          {
+            role: 'user',
+            content: [{ type: 'text', text: '识别这张菜单图片并按 JSON 返回。' }, ...imageParts]
+          }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 1200
+      });
+      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+      if (!Array.isArray(parsed.items) || parsed.items.length === 0) throw new Error('未识别到菜单');
+      const items = parsed.items.slice(0, 100).map((item, index) => ({
+        id: String(item.id || `vision-${index + 1}`).slice(0, 128),
+        name: String(item.name || '').trim().slice(0, 100),
+        category: String(item.category || '待确认').trim().slice(0, 40),
+        price: Math.max(0, Math.min(Number(item.price) || 0, 100000)),
+        ingredients: Array.isArray(item.ingredients) ? item.ingredients.map(String).slice(0, 30) : [],
+        tags: Array.isArray(item.tags) ? item.tags.map(String).slice(0, 20) : [],
+        confidence: Math.max(0, Math.min(Number(item.confidence) || 0.5, 1))
+      })).filter((item) => item.name.length > 0);
+      if (items.length === 0) throw new Error('菜单字段为空');
+      return {
+        usedModel: true,
+        items,
+        lowConfidenceFields: Array.isArray(parsed.lowConfidenceFields)
+          ? parsed.lowConfidenceFields.map(String).slice(0, 100) : [],
+        reply: typeof parsed.reply === 'string' ? parsed.reply.trim().slice(0, 300) : '',
+        model: this.model,
+        durationMs: Date.now() - startedAt
+      };
+    } catch (error) {
+      console.warn('LLM vision unavailable, using OCR fallback:', error?.message ?? 'unknown error');
+      return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '',
+        model: this.model, durationMs: Date.now() - startedAt };
     }
   }
 }

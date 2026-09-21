@@ -43,17 +43,20 @@ export struct RestaurantCard {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
-            Text(this.restaurant.open ? '营业中' : '休息中')
+            Text(this.restaurant.openStatusKnown === false ? '时间待确认' :
+              (this.restaurant.open ? '营业中' : '休息中'))
               .fontSize(11)
-              .fontColor(this.restaurant.open ? '#16785A' : '#8A8F8C')
+              .fontColor(this.restaurant.open && this.restaurant.openStatusKnown !== false ? '#16785A' : '#8A8F8C')
           }
           .width('100%')
 
-          Text(`${this.restaurant.cuisine}  ¥${this.restaurant.pricePerPerson}/人`)
+          Text(`${this.restaurant.cuisine}  ${this.restaurant.pricePerPerson > 0 ?
+            `¥${this.restaurant.pricePerPerson}/人` : '人均待补充'}`)
             .fontSize(13)
             .fontColor('#5F6964')
             .maxLines(1)
-          Text(`★ ${this.restaurant.rating.toFixed(1)}  ·  ${this.distanceLabel()}  ·  ${this.restaurant.address}`)
+          Text(`${this.restaurant.rating > 0 ? `★ ${this.restaurant.rating.toFixed(1)}  ·  ` : ''}` +
+            `${this.restaurant.distanceKm > 0 ? `${this.distanceLabel()}  ·  ` : ''}${this.restaurant.address}`)
             .fontSize(12)
             .fontColor('#7D8681')
             .maxLines(1)

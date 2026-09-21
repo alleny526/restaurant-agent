@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "com.example.xiaoyirestaurant",
-    "vendor": "example",
+    "bundleName": "com.alleny526.restaurantagent",
+    "vendor": "alleny",
     "versionCode": 1000000,
     "versionName": "1.0.0",
     "icon": "$media:app_icon",

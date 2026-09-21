@@ -1,15 +1,21 @@
 {
-  "name": "xiaoyi-restaurant-agent-server",
-  "version": "1.0.0",
+  "name": "restaurant-agent-server",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "小艺餐厅 Agent 本地演示服务与预置商家数据",
+  "description": "餐厅助手服务、SQLite 商家数据与 OpenAI-compatible 模型编排",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "start": "node src/server.js",
+    "public-gateway": "node src/public-gateway.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "import:catalog": "node src/import-catalog.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "sql.js": "^1.13.0"
   }
 }

@@ -3,29 +3,30 @@
 | 编号 | 实现位置 | 状态 |
 |---|---|---|
 | AC-01 默认进入对话页 | `Index.ets` 的 `selectedTab = 1` | 已实现 |
-| AC-02 自然语言推荐 | `/v1/agent/execute` + 确定性推荐 | 已实现并测试 |
+| AC-02 自然语言推荐 | App 输入 → HTTPS → DeepSeek 意图/排序 → 高德/SQLite → 模型回复 | 已实现并有确定性降级 |
 | AC-03 推荐展开 | `AllRecommendationsPage()` | 已实现 |
 | AC-04 商家详情 | `DetailPage()` | 已实现 |
 | AC-05 选择餐厅 | 推荐卡/详情页 + `select_restaurant` | 已实现并测试 |
 | AC-06 菜单缺失引导 | `arrive` 返回上传菜单提示 | 已实现并测试 |
-| AC-07 菜单识别 | PhotoPicker/Base64 + 服务端预置识别结果 | 演示实现 |
-| AC-08 完成就餐 | `finish_meal` 进入 REVIEW | 已实现并测试 |
-| AC-09 评论保存 | Node JSON store，绑定 sessionId 与 restaurantId | 已实现并测试 |
+| AC-07 菜单识别 | PhotoPicker + Core Vision Kit OCR + 菜名价格解析 | 已实现，服务端保留降级 |
+| AC-08 菜品建议 | DeepSeek 重排合法菜品 ID 并基于菜单事实回复 | 已实现，过敏项先硬过滤 |
+| AC-09 完成与评价 | 状态进入 REVIEW，评论脱敏并绑定餐厅保存 | 已实现并测试 |
 | AC-10 发现页 | 搜索、菜系/口味筛选、详情入口 | 已实现 |
 | AC-11 我的页 | 登录展示、昵称/籍贯/忌口/偏好 UI | 演示实现 |
+| AC-12 菜单版本确认 | OCR/视觉结果先进入待确认版本，确认后成为餐厅默认菜单 | 已实现并测试 |
+| AC-13 菜单追加上传 | 多张菜单按菜名合并，保留版本、来源、置信度和会话 | 已实现并测试 |
+| AC-14 会话恢复与定位 | Preferences 恢复流程；授权定位后使用高德周边检索 | 已实现，模拟器无定位时降级城市检索 |
+| AC-15 请求幂等与诊断 | `clientRequestId` 去重；本机诊断接口输出脱敏耗时 | 已实现并测试 |
 
-## 已执行验证（2026-09-20）
+## 自动验证
 
-- DevEco Studio 6.1.1/API 24 工具链构建成功，ArkTS 类型检查通过。
-- 生成 `entry/build/default/outputs/default/entry-default-unsigned.hap`；未配置项目方签名。
-- Node 服务 8/8 集成测试通过。
-- 应用专用接口测试覆盖发现、推荐、选店、到店、菜单上传、菜品推荐、完成用餐和评论保存。
-- 原有服务测试继续覆盖菜单纠错、评论脱敏、OTP、可选小艺 API Key 与餐厅上下文防串写。
+- Node 集成测试覆盖 SQLite、高德归一化、状态机、OCR 降级、评论脱敏、OTP 和 App 端到端契约。
+- 模型测试覆盖 DeepSeek-compatible URL、Bearer 认证、JSON 输出、意图解析和非法候选 ID 拒绝。
+- 未配置模型时完整流程仍通过；配置真实 API Key 后应按部署文档执行一次真机联调。
+- 服务端测试覆盖 22 项，包括菜单版本确认、坐标周边检索、请求幂等、快速模型路由和本机诊断。
 
 ## 本 toy project 不包含
 
-- Cloud Foundation、Cloud DB、云函数和 AGC 云资源。
-- 真实 OCR/大模型调用、真实商家数据、短信登录和生产数据库。
-- 应用商店发布签名、隐私合规材料及生产监控。
-
-这些内容不影响本地端云交互演示；若后续转为正式项目，应单独设计生产级身份认证、数据源、存储、HTTPS 和隐私合规方案。
+- Cloud Foundation、Cloud DB、云函数和系统级智能体组件。
+- 未授权的美团/饿了么数据或网页抓取。
+- 商店发布材料、生产监控、正式短信服务和生产级密钥托管。

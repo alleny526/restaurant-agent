@@ -1,11 +1,12 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { JsonStore } from './store.js';
+import { SqliteStore } from './store.js';
+import { AmapPlaceProvider } from './amap.js';
 import { RestaurantOrchestrator } from './orchestrator.js';
-import { ExplanationProvider, VisionProvider } from './providers.js';
-import { filterRestaurants, parseDiningIntent, recommendRestaurants } from './recommendation.js';
-import { createOtp, hashOtp, issueToken, verifyToken } from './security.js';
+import { ChatModelProvider, VisionProvider } from './providers.js';
+import { createOtp, hashOtp, issueToken, sanitizeReview, verifyToken } from './security.js';
+import { Telemetry } from './telemetry.js';
 
 function sendJson(response, statusCode, value, requestId, origin = '*') {
   response.writeHead(statusCode, {
@@ -13,7 +14,7 @@ function sendJson(response, statusCode, value, requestId, origin = '*') {
     'cache-control': 'no-store',
     'x-request-id': requestId,
     'access-control-allow-origin': origin,
-    'access-control-allow-headers': 'content-type, authorization, x-device-id, x-api-key',
+    'access-control-allow-headers': 'content-type, authorization, x-device-id',
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS'
   });
   response.end(JSON.stringify(value));
@@ -43,8 +44,15 @@ async function readJson(request, maxBytes = 8 * 1024 * 1024) {
   }
 }
 
-function publicRestaurant(restaurant) {
-  return { ...restaurant, recommendationReason: restaurant.recommendationReason ?? '' };
+function publicRestaurant(restaurant, reviews = []) {
+  return {
+    ...restaurant,
+    recommendationReason: restaurant.recommendationReason ?? '',
+    reviews: reviews.filter((item) => item.restaurantId === restaurant.id).map((item) => ({
+      id: item.id, rating: Number(item.rating) || 0, text: sanitizeReview(item.text ?? ''),
+      tags: Array.isArray(item.tags) ? item.tags : [], createdAt: item.updatedAt ?? item.createdAt
+    }))
+  };
 }
 
 function authorizedUser(request, state, config) {
@@ -68,23 +76,38 @@ function authorizedUser(request, state, config) {
 
 export async function createRestaurantServer(options = {}) {
   const config = {
-    dataFile: resolve(options.dataFile ?? process.env.DATA_FILE ?? './data/runtime.json'),
+    dataFile: resolve(options.dataFile ?? process.env.DATA_FILE ?? './data/restaurant-agent.sqlite'),
     authSecret: options.authSecret ?? process.env.AUTH_SECRET ?? 'development-secret-change-before-production',
     demoMode: options.demoMode ?? process.env.DEMO_MODE !== 'false',
     allowedOrigins: (options.allowedOrigins ?? process.env.ALLOWED_ORIGINS ?? '*').split(','),
-    xiaoyiApiKey: options.xiaoyiApiKey ?? process.env.XIAOYI_API_KEY ?? '',
-    visionApiUrl: process.env.VISION_API_URL ?? '',
-    visionApiKey: process.env.VISION_API_KEY ?? '',
-    llmApiUrl: process.env.LLM_API_URL ?? '',
-    llmApiKey: process.env.LLM_API_KEY ?? ''
+    visionApiUrl: options.visionApiUrl ?? process.env.VISION_API_URL ?? '',
+    visionApiKey: options.visionApiKey ?? process.env.VISION_API_KEY ?? '',
+    visionDemoMode: options.visionDemoMode ?? process.env.VISION_DEMO_MODE !== 'false',
+    llmBaseUrl: options.llmBaseUrl ?? process.env.LLM_BASE_URL ?? '',
+    llmApiKey: options.llmApiKey ?? process.env.LLM_API_KEY ?? '',
+    llmModel: options.llmModel ?? process.env.LLM_MODEL ?? '',
+    llmFastModel: options.llmFastModel ?? process.env.LLM_FAST_MODEL ?? '',
+    llmProvider: options.llmProvider ?? process.env.LLM_PROVIDER ?? '',
+    llmTimeoutMs: options.llmTimeoutMs ?? process.env.LLM_TIMEOUT_MS ?? 20_000,
+    amapWebKey: options.amapWebKey ?? process.env.AMAP_WEB_KEY ?? '',
+    amapDefaultRegion: options.amapDefaultRegion ?? process.env.AMAP_DEFAULT_REGION ?? '南京市',
+    amapLocation: options.amapLocation ?? process.env.AMAP_LOCATION ?? '',
+    amapRadiusMeters: options.amapRadiusMeters ?? process.env.AMAP_RADIUS_METERS ?? 5000,
+    amapCacheTtlSeconds: options.amapCacheTtlSeconds ?? process.env.AMAP_CACHE_TTL_SECONDS ?? 300
   };
   if (!config.demoMode && config.authSecret === 'development-secret-change-before-production') {
     throw new Error('生产环境必须配置强随机 AUTH_SECRET');
   }
-  const store = await new JsonStore(config.dataFile).init();
+  const store = await new SqliteStore(config.dataFile, {
+    initialRestaurants: options.initialRestaurants ?? []
+  }).init();
+  const chat = options.chatProvider ?? new ChatModelProvider(config, options.llmFetchImpl ?? globalThis.fetch);
+  const telemetry = options.telemetry ?? new Telemetry();
   const orchestrator = new RestaurantOrchestrator(store, {
     vision: new VisionProvider(config),
-    explanation: new ExplanationProvider(config)
+    chat,
+    places: new AmapPlaceProvider(config, options.fetchImpl ?? globalThis.fetch),
+    telemetry
   });
 
   const server = createServer(async (request, response) => {
@@ -106,13 +129,32 @@ export async function createRestaurantServer(options = {}) {
       const url = new URL(request.url, 'http://localhost');
       const path = url.pathname;
 
-      if (path.startsWith('/xiaoyi/tools/') && config.xiaoyiApiKey &&
-        request.headers['x-api-key'] !== config.xiaoyiApiKey) {
-        throw Object.assign(new Error('云插件密钥无效'), { statusCode: 401, code: 'INVALID_PLUGIN_KEY' });
+      if (request.method === 'GET' && path === '/healthz') {
+        sendJson(response, 200, {
+          status: 'ok', service: 'restaurant-agent', version: '2.0.0',
+          database: 'sqlite', amapConfigured: Boolean(config.amapWebKey), llmConfigured: chat.isConfigured(),
+          llmProvider: chat.providerName
+        }, requestId, origin);
+        return;
       }
 
-      if (request.method === 'GET' && path === '/healthz') {
-        sendJson(response, 200, { status: 'ok', service: 'xiaoyi-restaurant-agent', version: '1.0.0' }, requestId, origin);
+      if (request.method === 'GET' && path === '/internal/diagnostics') {
+        const remoteAddress = request.socket.remoteAddress ?? '';
+        if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteAddress)) {
+          throw Object.assign(new Error('诊断接口仅允许本机访问'), { statusCode: 403, code: 'LOCAL_ONLY' });
+        }
+        const state = store.snapshot();
+        sendJson(response, 200, {
+          service: 'restaurant-agent', database: 'sqlite',
+          counts: {
+            restaurants: state.restaurants.length,
+            sessions: state.sessions.length,
+            menuVersions: state.menuVersions.length,
+            processedRequests: state.processedRequests.length
+          },
+          models: { primary: chat.model, fast: chat.fastModel || chat.model },
+          metrics: telemetry.snapshot()
+        }, requestId, origin);
         return;
       }
 
@@ -125,9 +167,9 @@ export async function createRestaurantServer(options = {}) {
       }
 
       if (request.method === 'GET' && path === '/v1/restaurants') {
-        const state = store.snapshot();
         const params = Object.fromEntries(url.searchParams.entries());
-        const items = filterRestaurants(state.restaurants, params).map(publicRestaurant);
+        const reviews = store.snapshot().reviews;
+        const items = (await store.queryRestaurants(params)).map((item) => publicRestaurant(item, reviews));
         sendJson(response, 200, { items, total: items.length }, requestId, origin);
         return;
       }
@@ -136,7 +178,7 @@ export async function createRestaurantServer(options = {}) {
       if (request.method === 'GET' && restaurantMatch) {
         const restaurant = store.snapshot().restaurants.find((item) => item.id === decodeURIComponent(restaurantMatch[1]));
         if (!restaurant) throw Object.assign(new Error('餐厅不存在'), { statusCode: 404, code: 'RESTAURANT_NOT_FOUND' });
-        sendJson(response, 200, publicRestaurant(restaurant), requestId, origin);
+        sendJson(response, 200, publicRestaurant(restaurant, store.snapshot().reviews), requestId, origin);
         return;
       }
 
@@ -181,6 +223,12 @@ export async function createRestaurantServer(options = {}) {
       if (request.method === 'POST' && menuMatch) {
         const body = await readJson(request, 16 * 1024 * 1024);
         sendJson(response, 200, await orchestrator.recognizeMenu(menuMatch[1], body.images), requestId, origin);
+        return;
+      }
+
+      const confirmMenuMatch = path.match(/^\/v1\/sessions\/([^/]+)\/menu\/confirm$/);
+      if (request.method === 'POST' && confirmMenuMatch) {
+        sendJson(response, 200, await orchestrator.confirmMenu(confirmMenuMatch[1]), requestId, origin);
         return;
       }
 
@@ -271,59 +319,6 @@ export async function createRestaurantServer(options = {}) {
         return;
       }
 
-      // 小艺开放平台云插件：稳定、扁平的工具接口。
-      if (request.method === 'POST' && path === '/xiaoyi/tools/search_restaurants') {
-        const body = await readJson(request);
-        const state = store.snapshot();
-        const intent = parseDiningIntent(body.query ?? '');
-        const profile = state.users.find((item) => item.id === body.userId) ?? null;
-        const restaurants = recommendRestaurants(state.restaurants, intent, profile, Math.min(Number(body.limit) || 5, 5));
-        sendJson(response, 200, { intent, restaurants }, requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/xiaoyi/tools/select_restaurant') {
-        const body = await readJson(request);
-        const existing = await orchestrator.ensureExternalSession(body.conversationId ?? randomUUID(), body.userId ?? '');
-        sendJson(response, 200, await orchestrator.selectRestaurant(existing.id, body.restaurantId), requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/xiaoyi/tools/arrive') {
-        const body = await readJson(request);
-        const existing = await orchestrator.ensureExternalSession(body.conversationId ?? randomUUID(), body.userId ?? '');
-        sendJson(response, 200, await orchestrator.arrive(existing.id), requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/xiaoyi/tools/submit_menu') {
-        const body = await readJson(request);
-        const existing = await orchestrator.ensureExternalSession(body.conversationId ?? randomUUID(), body.userId ?? '');
-        sendJson(response, 200,
-          await orchestrator.acceptRecognizedMenu(existing.id, body.items, body.lowConfidenceFields), requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/xiaoyi/tools/finish_dining') {
-        const body = await readJson(request);
-        const existing = await orchestrator.ensureExternalSession(body.conversationId ?? randomUUID(), body.userId ?? '');
-        sendJson(response, 200, await orchestrator.finishDining(existing.id), requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/xiaoyi/tools/submit_review') {
-        const body = await readJson(request);
-        const existing = await orchestrator.ensureExternalSession(body.conversationId ?? randomUUID(), body.userId ?? '');
-        if (!body.restaurantId || existing.selectedRestaurantId !== body.restaurantId) {
-          throw Object.assign(new Error('评价餐厅与当前会话选择不一致'), {
-            statusCode: 409, code: 'RESTAURANT_CONTEXT_MISMATCH'
-          });
-        }
-        await orchestrator.finishDining(existing.id);
-        sendJson(response, 200, await orchestrator.handleMessage(existing.id, body.text, body.userId ?? ''), requestId, origin);
-        return;
-      }
-
       throw Object.assign(new Error('接口不存在'), { statusCode: 404, code: 'NOT_FOUND' });
     } catch (error) {
       const statusCode = Number(error.statusCode) || 500;
@@ -334,5 +329,5 @@ export async function createRestaurantServer(options = {}) {
     }
   });
 
-  return { server, store, orchestrator, config };
+  return { server, store, orchestrator, telemetry, config };
 }

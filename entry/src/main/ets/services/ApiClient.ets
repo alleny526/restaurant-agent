@@ -17,8 +17,8 @@ export class ApiClient {
     const options: http.HttpRequestOptions = {
       method: method,
       header: headers,
-      connectTimeout: 2000,
-      readTimeout: 15000,
+      connectTimeout: 10000,
+      readTimeout: 45000,
       expectDataType: http.HttpDataType.STRING
     };
     if (body.length > 0) {
@@ -33,7 +33,7 @@ export class ApiClient {
       return text;
     } catch (error) {
       const message: string = (error as Error).message;
-      throw new Error(message.length > 0 ? message : '无法连接本地演示服务');
+      throw new Error(message.length > 0 ? message : '无法连接云端演示服务');
     } finally {
       client.destroy();
     }

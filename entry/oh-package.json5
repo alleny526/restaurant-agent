@@ -1,10 +1,9 @@
 {
   "name": "entry",
   "version": "1.0.0",
-  "description": "小艺餐厅 Agent HarmonyOS 客户端",
+  "description": "餐厅助手 HarmonyOS 客户端",
   "main": "",
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {}
 }
-

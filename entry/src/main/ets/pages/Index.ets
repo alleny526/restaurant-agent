@@ -1,5 +1,6 @@
+import { Context } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { LengthMetrics } from '@kit.ArkUI';
+import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
 import {
   AgentRequest,
   AgentResponse,
@@ -9,12 +10,16 @@ import {
   MenuImage,
   MenuItem,
   Restaurant,
+  RestaurantReview,
   SessionState,
-  UserProfile
+  UserProfile,
+  UserLocation
 } from '../model/Models';
-import { MockAgent } from '../services/MockAgent';
 import { MenuImagePicker, PickedMenuImage } from '../services/MenuImagePicker';
 import { RestaurantAgentApi } from '../services/RestaurantAgentApi';
+import { AppConfig } from '../services/AppConfig';
+import { LocationService } from '../services/LocationService';
+import { PersistedConversation, SessionPersistence } from '../services/SessionPersistence';
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -24,21 +29,36 @@ const COLOR_BG: string = '#FFF8F3';
 const COLOR_CARD: string = '#FFFFFFFF';
 const COLOR_LINE: string = '#EFE3DB';
 
+const EMPTY_RESTAURANT: Restaurant = {
+  id: '', name: '', cuisine: '', tags: [], address: '', distanceKm: 0,
+  pricePerPerson: 0, rating: 0, open: false, reason: '', menuAvailable: false, menu: [], reviews: []
+};
+
 @Entry
 @Component
 struct Index {
   private chatScroller: Scroller = new Scroller();
+  private userLocation: UserLocation | undefined = undefined;
 
   @State selectedTab: number = 1;
   @State inputText: string = '';
   @State searchText: string = '';
   @State selectedCuisine: string = '全部';
-  @State selectedTaste: string = '全部';
+  @State maxDistanceKm: number = 0;
+  @State maxPrice: number = 0;
+  @State onlyOpen: boolean = false;
+  @State isRestaurantLoading: boolean = true;
+  @State isLoadingMoreRestaurants: boolean = false;
+  @State isDiscoverSearching: boolean = false;
+  @State serverSearchActive: boolean = false;
+  @State hasMoreRestaurants: boolean = true;
+  @State restaurantPage: number = 1;
+  @State detailMenuExpanded: boolean = false;
   @State isLoading: boolean = false;
   @State showAllRecommendations: boolean = false;
   @State showDetail: boolean = false;
-  @State detailRestaurant: Restaurant = MockAgent.restaurants()[0];
-  @State restaurants: Restaurant[] = MockAgent.restaurants();
+  @State detailRestaurant: Restaurant = EMPTY_RESTAURANT;
+  @State restaurants: Restaurant[] = [];
   @State recommendations: Restaurant[] = [];
   @State recognizedMenu: MenuItem[] = [];
   @State dishRecommendations: DishRecommendation[] = [];
@@ -53,7 +73,9 @@ struct Index {
     sessionId: `session-${Date.now()}`,
     stage: MealStage.PRE_MEAL,
     selectedRestaurantId: '',
-    userId: 'guest'
+    userId: 'guest',
+    menuStatus: 'NONE',
+    menuVersionId: ''
   };
   @State profile: UserProfile = {
     userId: 'guest',
@@ -69,7 +91,7 @@ struct Index {
     {
       id: 'welcome',
       role: 'agent',
-      text: '你好，我是小艺餐厅助手。告诉我今天想吃什么，比如“清淡的江浙菜”，我会从商家库里帮你筛选。',
+      text: '你好，我是餐厅助手。告诉我今天想吃什么，比如“清淡的江浙菜”，我会结合模型与商家库帮你筛选。',
       timestamp: Date.now(),
       restaurants: [],
       recognizedMenu: [],
@@ -78,26 +100,162 @@ struct Index {
   ];
 
   aboutToAppear(): void {
-    this.loadRestaurants();
+    this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
+    this.initialize();
+  }
+
+  private async initialize(): Promise<void> {
+    const context: Context | undefined = this.getUIContext().getHostContext();
+    if (context !== undefined) {
+      const restored: PersistedConversation | undefined = await SessionPersistence.load(context);
+      if (restored !== undefined) {
+        this.session = restored.session;
+        this.messages = restored.messages;
+        this.recognizedMenu = restored.recognizedMenu;
+        this.dishRecommendations = restored.dishRecommendations;
+      }
+      this.userLocation = await LocationService.current(context);
+    }
+    await this.loadRestaurants();
+  }
+
+  private async persistConversation(): Promise<void> {
+    const context: Context | undefined = this.getUIContext().getHostContext();
+    if (context === undefined) return;
+    await SessionPersistence.save(context, {
+      session: this.session,
+      messages: this.messages,
+      recognizedMenu: this.recognizedMenu,
+      dishRecommendations: this.dishRecommendations
+    } as PersistedConversation);
+  }
+
+  private async restartConversation(): Promise<void> {
+    this.session = {
+      sessionId: `session-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
+      stage: MealStage.PRE_MEAL,
+      selectedRestaurantId: '',
+      userId: this.profile.userId,
+      menuStatus: 'NONE',
+      menuVersionId: ''
+    };
+    this.messages = [{
+      id: `welcome-${Date.now()}`,
+      role: 'agent',
+      text: '你好，我是餐厅助手。告诉我今天想吃什么，我会结合模型与商家库帮你筛选。',
+      timestamp: Date.now(),
+      restaurants: [],
+      recognizedMenu: [],
+      dishRecommendations: []
+    }];
+    this.recommendations = [];
+    this.recognizedMenu = [];
+    this.dishRecommendations = [];
+    this.selectedMenuImages = [];
+    this.inputText = '';
+    this.notice = '';
+    await this.persistConversation();
   }
 
   private async loadRestaurants(): Promise<void> {
+    this.isRestaurantLoading = true;
     try {
-      const response: AgentResponse = await RestaurantAgentApi.listRestaurants();
+      const response: AgentResponse = await RestaurantAgentApi.listRestaurants(this.userLocation, 1, 20);
       this.restaurants = response.restaurants;
+      this.serverSearchActive = false;
+      this.restaurantPage = 1;
+      this.hasMoreRestaurants = response.hasMore === true;
+      if (!this.cuisineOptions().includes(this.selectedCuisine)) this.selectedCuisine = '全部';
+      if (['rest-lanxi', 'rest-heshan', 'rest-suyuan', 'rest-chuanyu', 'rest-chaoxiang', 'rest-beifang']
+        .includes(this.session.selectedRestaurantId) || this.session.selectedRestaurantId.startsWith('demo-r-')) {
+        this.session = {
+          sessionId: this.session.sessionId,
+          stage: MealStage.PRE_MEAL,
+          selectedRestaurantId: '',
+          userId: this.session.userId,
+          menuStatus: 'NONE',
+          menuVersionId: ''
+        };
+        this.recognizedMenu = [];
+        this.dishRecommendations = [];
+        this.notice = '此前选择的演示餐厅已移除，请重新选择。';
+        await this.persistConversation();
+      }
     } catch (error) {
       this.notice = `商家库暂不可用：${(error as Error).message}`;
+    } finally {
+      this.isRestaurantLoading = false;
     }
   }
 
+  private async loadMoreRestaurants(): Promise<void> {
+    if (this.isRestaurantLoading || this.isLoadingMoreRestaurants || !this.hasMoreRestaurants) return;
+    this.isLoadingMoreRestaurants = true;
+    try {
+      const nextPage: number = this.restaurantPage + 1;
+      const response: AgentResponse = await RestaurantAgentApi.listRestaurants(this.userLocation, nextPage, 20,
+        this.serverSearchActive ? this.searchText.trim() : '');
+      const existingIds: string[] = this.restaurants.map((item: Restaurant) => item.id);
+      const appended: Restaurant[] = response.restaurants.filter((item: Restaurant) => !existingIds.includes(item.id));
+      this.restaurants = this.restaurants.concat(appended);
+      this.restaurantPage = nextPage;
+      this.hasMoreRestaurants = response.hasMore === true;
+    } catch (error) {
+      this.notice = `加载更多餐厅失败：${(error as Error).message}`;
+    } finally {
+      this.isLoadingMoreRestaurants = false;
+    }
+  }
+
+  private async searchDiscover(): Promise<void> {
+    if (this.isDiscoverSearching) return;
+    this.isDiscoverSearching = true;
+    this.isRestaurantLoading = true;
+    this.notice = '';
+    const query: string = this.searchText.trim();
+    try {
+      const response: AgentResponse = await RestaurantAgentApi.listRestaurants(this.userLocation, 1, 20, query);
+      this.restaurants = response.restaurants;
+      this.recommendations = response.restaurants;
+      this.restaurantPage = 1;
+      this.hasMoreRestaurants = response.hasMore === true;
+      this.serverSearchActive = query.length > 0;
+      this.selectedCuisine = '全部';
+      this.maxDistanceKm = 0;
+      this.maxPrice = 0;
+      this.onlyOpen = false;
+    } catch (error) {
+      this.notice = `搜索餐厅失败：${(error as Error).message}`;
+    } finally {
+      this.isDiscoverSearching = false;
+      this.isRestaurantLoading = false;
+    }
+  }
+
+  private mergeRestaurant(item: Restaurant | undefined): void {
+    if (item === undefined || item.id.length === 0) return;
+    const index: number = this.restaurants.findIndex((saved: Restaurant) => saved.id === item.id);
+    if (index >= 0) {
+      const updated: Restaurant[] = this.restaurants.slice();
+      updated[index] = item;
+      this.restaurants = updated;
+    } else {
+      this.restaurants = [item].concat(this.restaurants);
+    }
+    if (this.detailRestaurant.id === item.id) this.detailRestaurant = item;
+  }
+
   private createRequest(action: string, message: string = '', restaurantId: string = ''): AgentRequest {
+    const isMenuUpload: boolean = action === 'upload_menu';
     return {
       action,
+      clientRequestId: `request-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
       message,
       restaurantId,
-      menuImages: this.selectedMenuImages,
-      recognizedMenu: this.recognizedMenu,
+      menuImages: isMenuUpload ? this.selectedMenuImages : [],
+      recognizedMenu: isMenuUpload ? this.recognizedMenu : [],
       rating: 0,
+      location: this.userLocation,
       state: this.session,
       profile: this.profile
     } as AgentRequest;
@@ -115,6 +273,7 @@ struct Index {
       dishRecommendations
     };
     this.messages = this.messages.concat([newMessage]);
+    this.persistConversation();
     setTimeout((): void => {
       this.chatScroller.scrollEdge(Edge.Bottom);
     }, 80);
@@ -130,15 +289,23 @@ struct Index {
       const response: AgentResponse = await RestaurantAgentApi.execute(request);
       this.session = response.state;
       this.recommendations = response.restaurants;
+      this.mergeRestaurant(response.selectedRestaurant);
       this.recognizedMenu = response.recognizedMenu;
       this.dishRecommendations = response.dishRecommendations;
+      if (request.action === 'upload_menu') {
+        this.selectedMenuImages = [];
+      }
+      if (request.action === 'select_restaurant') {
+        this.messages = [];
+        this.recommendations = [];
+        this.selectedMenuImages = [];
+      }
       this.appendMessage('agent', response.reply, response.restaurants, response.recognizedMenu,
         response.dishRecommendations);
       return response;
     } catch (error) {
       const message: string = (error as Error).message;
       this.notice = message.length > 0 ? message : '服务暂时不可用，请稍后重试。';
-      this.appendMessage('agent', '商家服务暂时不可用。我不会编造商家信息，请稍后重试。');
       return undefined;
     } finally {
       this.isLoading = false;
@@ -146,16 +313,20 @@ struct Index {
   }
 
   private async sendMessage(): Promise<void> {
-    const value: string = this.inputText.trim();
-    if (value.length === 0) {
+    const text: string = this.inputText.trim();
+    if (text.length === 0 || this.isLoading || this.session.stage === MealStage.END) {
       return;
     }
     this.inputText = '';
-    this.appendMessage('user', value);
-    await this.execute(this.createRequest('chat', value));
+    this.appendMessage('user', text);
+    await this.execute(this.createRequest('chat', text));
   }
 
   private async selectRestaurant(item: Restaurant): Promise<void> {
+    if (!this.canSelectRestaurant()) {
+      this.notice = '已进入评价阶段，当前餐厅不能再更换。';
+      return;
+    }
     const response: AgentResponse | undefined = await this.execute(this.createRequest('select_restaurant', '', item.id));
     if (response !== undefined) {
       this.detailRestaurant = item;
@@ -173,6 +344,10 @@ struct Index {
     await this.execute(this.createRequest('finish_meal'));
   }
 
+  private async confirmMenu(): Promise<void> {
+    await this.execute(this.createRequest('confirm_menu'));
+  }
+
   private async pickMenuPhoto(): Promise<void> {
     if (this.session.selectedRestaurantId.length === 0) {
       this.notice = '请先选择餐厅，到店后再上传菜单。';
@@ -183,12 +358,16 @@ struct Index {
       if (picked === null) {
         return;
       }
+      this.recognizedMenu = picked.recognizedMenu;
       this.selectedMenuImages = [{
-        fileName: picked.fileName,
-        mimeType: picked.mimeType,
-        base64: picked.base64
-      } as MenuImage];
-      this.appendMessage('user', '已上传菜单照片');
+          fileName: picked.fileName,
+          mimeType: picked.mimeType,
+          base64: picked.base64
+        } as MenuImage];
+      const uploadText: string = picked.recognizedMenu.length > 0
+        ? `已选择菜单照片，端侧 OCR 提取到 ${picked.recognizedMenu.length} 道菜，正在与大模型视觉结果交叉确认`
+        : '已选择菜单照片，端侧 OCR 未提取到结构化菜品，正在尝试大模型图片识别';
+      this.appendMessage('user', uploadText);
       await this.execute(this.createRequest('upload_menu'));
     } catch (error) {
       const businessError: BusinessError = error as BusinessError;
@@ -200,6 +379,7 @@ struct Index {
 
   private openDetail(item: Restaurant): void {
     this.detailRestaurant = item;
+    this.detailMenuExpanded = false;
     this.showDetail = true;
   }
 
@@ -207,15 +387,76 @@ struct Index {
     return this.restaurants.find((item: Restaurant) => item.id === this.session.selectedRestaurantId);
   }
 
+  private canSelectRestaurant(): boolean {
+    return this.session.stage !== MealStage.REVIEW && this.session.stage !== MealStage.END;
+  }
+
+  private canChangeRestaurant(): boolean {
+    return this.session.selectedRestaurantId.length > 0 &&
+      this.session.stage !== MealStage.REVIEW && this.session.stage !== MealStage.END;
+  }
+
+  private restaurantActionLabel(): string {
+    return this.session.selectedRestaurantId.length > 0 ? '换选这家' : '选择这家';
+  }
+
   private filteredRestaurants(): Restaurant[] {
-    const query: string = this.searchText.trim().toLowerCase();
+    const query: string = this.serverSearchActive ? '' : this.searchText.trim().toLowerCase();
     return this.restaurants.filter((item: Restaurant) => {
       const cuisineMatched: boolean = this.selectedCuisine === '全部' || item.cuisine === this.selectedCuisine;
-      const tasteMatched: boolean = this.selectedTaste === '全部' || item.tags.includes(this.selectedTaste);
+      const distanceMatched: boolean = this.maxDistanceKm === 0 ||
+        (item.distanceKm > 0 && item.distanceKm <= this.maxDistanceKm);
+      const priceMatched: boolean = this.maxPrice === 0 ||
+        (item.pricePerPerson > 0 && item.pricePerPerson <= this.maxPrice);
+      const openMatched: boolean = !this.onlyOpen || item.open;
       const queryMatched: boolean = query.length === 0 || item.name.toLowerCase().includes(query) ||
         item.cuisine.toLowerCase().includes(query) || item.tags.join(' ').toLowerCase().includes(query);
-      return cuisineMatched && tasteMatched && queryMatched;
+      return cuisineMatched && distanceMatched && priceMatched && openMatched && queryMatched;
     });
+  }
+
+  private cuisineOptions(): string[] {
+    const values: string[] = ['全部'];
+    this.restaurants.forEach((item: Restaurant) => {
+      const value: string = item.cuisine.trim();
+      if (value.length > 0 && !values.includes(value)) values.push(value);
+    });
+    return values;
+  }
+
+  private selectCuisine(value: string): void {
+    this.selectedCuisine = value !== '全部' && this.selectedCuisine === value ? '全部' : value;
+  }
+
+  private conditionSelected(value: string): boolean {
+    if (value === '全部') return this.maxDistanceKm === 0 && this.maxPrice === 0 && !this.onlyOpen;
+    if (value === '1km内') return this.maxDistanceKm === 1;
+    if (value === '3km内') return this.maxDistanceKm === 3;
+    if (value === '¥50内') return this.maxPrice === 50;
+    if (value === '¥100内') return this.maxPrice === 100;
+    return value === '营业中' && this.onlyOpen;
+  }
+
+  private toggleCondition(value: string): void {
+    if (value === '全部') {
+      this.maxDistanceKm = 0;
+      this.maxPrice = 0;
+      this.onlyOpen = false;
+    } else if (value === '1km内') {
+      this.maxDistanceKm = this.maxDistanceKm === 1 ? 0 : 1;
+    } else if (value === '3km内') {
+      this.maxDistanceKm = this.maxDistanceKm === 3 ? 0 : 3;
+    } else if (value === '¥50内') {
+      this.maxPrice = this.maxPrice === 50 ? 0 : 50;
+    } else if (value === '¥100内') {
+      this.maxPrice = this.maxPrice === 100 ? 0 : 100;
+    } else if (value === '营业中') {
+      this.onlyOpen = !this.onlyOpen;
+    }
+  }
+
+  private filterSelected(label: string, type: string): boolean {
+    return type === 'cuisine' ? this.selectedCuisine === label : this.conditionSelected(label);
   }
 
   private stageLabel(): string {
@@ -267,7 +508,7 @@ struct Index {
     }
     this.profile = {
       userId: `user-${this.phoneInput.substring(7)}`,
-      nickname: this.editNickname.length > 0 ? this.editNickname : '小艺用户',
+      nickname: this.editNickname.length > 0 ? this.editNickname : '餐厅用户',
       phone: this.phoneInput,
       hometown: this.editHometown,
       dietaryRestrictions: this.profile.dietaryRestrictions,
@@ -315,6 +556,21 @@ struct Index {
   }
 
   @Builder
+  private FilterChip(label: string, type: string) {
+    Text(label)
+      .fontSize(12)
+      .fontWeight(this.filterSelected(label, type) ? FontWeight.Medium : FontWeight.Regular)
+      .fontColor(this.filterSelected(label, type) ? Color.White : COLOR_MUTED)
+      .padding({ left: 13, right: 13, top: 7, bottom: 7 })
+      .backgroundColor(this.filterSelected(label, type) ? COLOR_PRIMARY : '#FFF0E8')
+      .borderRadius(18)
+      .onClick(() => {
+        if (type === 'cuisine') this.selectCuisine(label);
+        else this.toggleCondition(label);
+      })
+  }
+
+  @Builder
   private RestaurantCard(item: Restaurant, compact: boolean) {
     Column({ space: 10 }) {
       Row({ space: 12 }) {
@@ -339,16 +595,20 @@ struct Index {
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
               .layoutWeight(1)
-            Text(item.open ? '营业中' : '休息中')
+            Text(item.openStatusKnown === false ? '时间待确认' : (item.open ? '营业中' : '休息中'))
               .fontSize(11)
-              .fontColor(item.open ? '#2E8B57' : COLOR_MUTED)
+              .fontColor(item.open && item.openStatusKnown !== false ? '#2E8B57' : COLOR_MUTED)
           }
           .width('100%')
-          Text(`${item.cuisine} · ${item.distanceKm.toFixed(1)}km · ¥${item.pricePerPerson}/人`)
+          Text(`${item.cuisine}` +
+            `${item.distanceKm > 0 ? ` · ${item.distanceKm.toFixed(1)}km` : ''}` +
+            `${item.pricePerPerson > 0 ? ` · ¥${item.pricePerPerson}/人` : ' · 人均待补充'}`)
             .fontSize(13)
             .fontColor(COLOR_MUTED)
           Row({ space: 5 }) {
-            Text(`★ ${item.rating.toFixed(1)}`).fontSize(12).fontColor('#C27A00')
+            if (item.rating > 0) {
+              Text(`★ ${item.rating.toFixed(1)}`).fontSize(12).fontColor('#C27A00')
+            }
             Text(item.tags.slice(0, 2).join(' · ')).fontSize(12).fontColor(COLOR_MUTED)
           }
         }
@@ -367,6 +627,22 @@ struct Index {
           .fontSize(12)
           .fontColor('#99867D')
           .width('100%')
+        if (item.menuAvailable) {
+          Text(`菜单：${item.menu.slice(0, 3).map((dish: MenuItem) => dish.name).join('、')}`)
+            .fontSize(12)
+            .fontColor(COLOR_MUTED)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+        }
+        if ((item.reviews?.length ?? 0) > 0) {
+          Text(`评价：${item.reviews?.[0].text ?? ''}`)
+            .fontSize(12)
+            .fontColor(COLOR_MUTED)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+        }
       }
 
       Row({ space: 10 }) {
@@ -379,14 +655,15 @@ struct Index {
           .backgroundColor('#FFF0E8')
           .borderRadius(18)
           .onClick(() => this.openDetail(item))
-        Button('选择这家')
+        Button(this.restaurantActionLabel())
           .type(ButtonType.Normal)
           .fontSize(13)
           .height(36)
           .layoutWeight(1)
-          .fontColor(Color.White)
-          .backgroundColor(COLOR_PRIMARY)
+          .fontColor(this.canSelectRestaurant() ? Color.White : COLOR_MUTED)
+          .backgroundColor(this.canSelectRestaurant() ? COLOR_PRIMARY : '#E6DED9')
           .borderRadius(18)
+          .enabled(this.canSelectRestaurant() && !this.isLoading)
           .onClick(() => this.selectRestaurant(item))
       }
       .width('100%')
@@ -529,10 +806,6 @@ struct Index {
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        Text('切换')
-          .fontSize(12)
-          .fontColor(COLOR_PRIMARY_DARK)
-          .onClick(() => this.selectedTab = 0)
       }
       .width('100%')
       .padding(12)
@@ -543,55 +816,71 @@ struct Index {
   }
 
   @Builder
-  private StageActions() {
-    Row({ space: 8 }) {
-      if (this.session.stage === MealStage.RESTAURANT_SELECTED) {
-        Button('我已抵达').onClick(() => this.markArrived())
-      }
-      if (this.session.stage === MealStage.ARRIVED) {
-        Button('拍照 / 上传菜单').onClick(() => this.pickMenuPhoto())
-      }
-      if (this.session.stage === MealStage.MENU_READY || this.session.stage === MealStage.DINING) {
-        Button('就餐完毕').onClick(() => this.finishMeal())
-      }
-      if (this.session.stage === MealStage.REVIEW) {
-        Button('写下体验').onClick(() => this.inputText = '味道不错，服务也很好')
-      }
-    }
-    .width('100%')
-    .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-    .justifyContent(FlexAlign.Start)
-  }
-
-  @Builder
-  private QuickDemoEntry() {
-    Button('快捷推荐')
+  private FlowActionButton(label: string, click: () => void) {
+    Button(label)
       .type(ButtonType.Normal)
       .height(36)
-      .fontSize(13)
+      .layoutWeight(1)
+      .fontSize(12)
       .fontColor(COLOR_PRIMARY_DARK)
       .backgroundColor('#FFF0E8')
       .borderRadius(18)
-      .onClick(() => {
-        this.inputText = '帮我推荐清淡、人均 100 元以内的餐厅';
-        this.sendMessage();
-      })
+      .constraintSize({ minWidth: 0 })
+      .onClick(click)
+  }
+
+  @Builder
+  private StageActions() {
+    if (this.session.stage !== MealStage.PRE_MEAL && this.session.stage !== MealStage.END) {
+      Row({ space: 6 }) {
+        if (this.session.stage === MealStage.RESTAURANT_SELECTED) {
+          this.FlowActionButton('我已抵达', () => this.markArrived())
+        }
+        if (this.session.stage === MealStage.ARRIVED) {
+          this.FlowActionButton('上传菜单', () => this.pickMenuPhoto())
+        }
+        if (this.session.stage === MealStage.MENU_READY) {
+          this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
+          this.FlowActionButton('确认菜单', () => this.confirmMenu())
+        }
+        if (this.session.stage === MealStage.DINING) {
+          this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
+          this.FlowActionButton('就餐完毕', () => this.finishMeal())
+        }
+        if (this.session.stage === MealStage.REVIEW) {
+          this.FlowActionButton('写下体验', () => this.inputText = '味道不错，服务也很好')
+        }
+        if (this.canChangeRestaurant()) {
+          this.FlowActionButton('换选餐厅', () => this.selectedTab = 0)
+        }
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+      .justifyContent(FlexAlign.Start)
+    }
   }
 
   @Builder
   private ChatPage() {
     Column() {
       Row() {
-        Column({ space: 3 }) {
-          Text('小艺餐厅').fontSize(24).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-          Text(this.stageLabel()).fontSize(12).fontColor(COLOR_MUTED)
+        Column({ space: 4 }) {
+          Text('餐厅助手').fontSize(26).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
+          Text(this.stageLabel()).fontSize(13).fontColor(COLOR_MUTED)
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        this.QuickDemoEntry()
+        Button('新对话')
+          .type(ButtonType.Normal)
+          .height(36)
+          .fontSize(12)
+          .fontColor(COLOR_PRIMARY_DARK)
+          .backgroundColor('#FFF0E8')
+          .borderRadius(18)
+          .onClick(() => this.restartConversation())
       }
       .width('100%')
-      .padding({ left: 18, right: 18, top: 14, bottom: 10 })
+      .padding({ left: 18, right: 18, top: 16, bottom: 12 })
 
       if (this.notice.length > 0) {
         Text(this.notice)
@@ -604,13 +893,9 @@ struct Index {
           .width('92%')
       }
 
-      Column() {
-        this.SelectedRestaurantBanner()
-      }
-      .padding({ left: 14, right: 14 })
-
       Scroll(this.chatScroller) {
         Column({ space: 12 }) {
+          this.SelectedRestaurantBanner()
           ForEach(this.messages, (message: ChatMessage) => {
             if (message.restaurants.length > 0) {
               this.RecommendationPanel(message.restaurants)
@@ -631,6 +916,15 @@ struct Index {
       .layoutWeight(1)
       .width('100%')
 
+      if (this.isLoading) {
+        Row({ space: 7 }) {
+          LoadingProgress().width(16).height(16).color(COLOR_PRIMARY)
+          Text('助手正在处理…').fontSize(12).fontColor(COLOR_MUTED)
+        }
+        .padding({ left: 16, right: 16, top: 5, bottom: 3 })
+        .width('100%')
+      }
+
       this.StageActions()
 
       Row({ space: 8 }) {
@@ -639,26 +933,37 @@ struct Index {
           .width(42)
           .height(42)
           .fontSize(22)
-          .fontColor(COLOR_PRIMARY_DARK)
-          .backgroundColor('#FFF0E8')
+          .fontColor(this.session.stage === MealStage.ARRIVED || this.session.stage === MealStage.MENU_READY ||
+            this.session.stage === MealStage.DINING ? COLOR_PRIMARY_DARK : '#AFA39D')
+          .backgroundColor(this.session.stage === MealStage.ARRIVED || this.session.stage === MealStage.MENU_READY ||
+            this.session.stage === MealStage.DINING ? '#FFF0E8' : '#F0EBE8')
+          .enabled((this.session.stage === MealStage.ARRIVED || this.session.stage === MealStage.MENU_READY ||
+            this.session.stage === MealStage.DINING) && !this.isLoading)
           .onClick(() => this.pickMenuPhoto())
-        TextInput({ text: this.inputText, placeholder: this.session.stage === MealStage.REVIEW ?
-          '说说味道、服务、环境…' : '告诉小艺你想吃什么…' })
+        TextInput({ text: this.inputText, placeholder: this.session.stage === MealStage.END ?
+          '本次用餐已完成，请点击“新对话”' : (this.session.stage === MealStage.REVIEW ?
+          '说说味道、服务、环境…' : '告诉助手你想吃什么…') })
           .layoutWeight(1)
           .height(44)
           .fontSize(14)
           .backgroundColor(Color.White)
           .borderRadius(22)
+          .enabled(this.session.stage !== MealStage.END && !this.isLoading)
           .onChange((value: string) => this.inputText = value)
+          .onFocus(() => {
+            setTimeout((): void => this.chatScroller.scrollEdge(Edge.Bottom), 120);
+          })
           .onSubmit(() => this.sendMessage())
         Button(this.isLoading ? '处理中' : '发送')
           .type(ButtonType.Normal)
+          .width(72)
           .height(42)
           .fontSize(13)
           .fontColor(Color.White)
-          .backgroundColor(this.isLoading ? '#D6A491' : COLOR_PRIMARY)
+          .backgroundColor(this.inputText.trim().length > 0 && !this.isLoading &&
+            this.session.stage !== MealStage.END ? COLOR_PRIMARY : '#D6A491')
           .borderRadius(21)
-          .enabled(!this.isLoading)
+          .enabled(this.inputText.trim().length > 0 && !this.isLoading && this.session.stage !== MealStage.END)
           .onClick(() => this.sendMessage())
       }
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
@@ -672,7 +977,7 @@ struct Index {
   @Builder
   private DiscoverPage() {
     Column() {
-      this.PageHeader('发现餐厅', '主动浏览，也可以交给小艺帮你缩小选择')
+      this.PageHeader('发现餐厅', '主动浏览，也可以交给助手帮你缩小选择')
       Row({ space: 8 }) {
         TextInput({ text: this.searchText, placeholder: '搜索餐厅、菜系或标签' })
           .layoutWeight(1)
@@ -680,21 +985,22 @@ struct Index {
           .backgroundColor(Color.White)
           .borderRadius(20)
           .onChange((value: string) => this.searchText = value)
-        Button('小艺')
+        Button('搜索')
           .height(40)
           .fontSize(13)
           .fontColor(Color.White)
           .backgroundColor(COLOR_PRIMARY)
-          .onClick(() => this.selectedTab = 1)
+          .enabled(!this.isDiscoverSearching)
+          .onClick(() => this.searchDiscover())
       }
       .padding({ left: 14, right: 14, bottom: 10 })
       .width('100%')
 
       Scroll() {
         Row({ space: 8 }) {
-          ForEach(['全部', '江浙菜', '杭帮菜', '素食', '家常菜'], (value: string) => {
-            this.Chip(value, this.selectedCuisine === value, () => this.selectedCuisine = value)
-          })
+          ForEach(this.cuisineOptions(), (value: string) => {
+            this.FilterChip(value, 'cuisine')
+          }, (value: string) => `cuisine-${value}`)
         }
         .padding({ left: 14, right: 14 })
       }
@@ -705,9 +1011,9 @@ struct Index {
 
       Scroll() {
         Row({ space: 8 }) {
-          ForEach(['全部', '清淡', '少油', '时令', '性价比'], (value: string) => {
-            this.Chip(value, this.selectedTaste === value, () => this.selectedTaste = value)
-          })
+          ForEach(['全部', '1km内', '3km内', '¥50内', '¥100内', '营业中'], (value: string) => {
+            this.FilterChip(value, 'condition')
+          }, (value: string) => `condition-${value}`)
         }
         .padding({ left: 14, right: 14 })
       }
@@ -717,16 +1023,40 @@ struct Index {
       .height(42)
 
       List({ space: 12 }) {
-        ForEach(this.filteredRestaurants(), (item: Restaurant) => {
+        if (this.filteredRestaurants().length === 0) {
           ListItem() {
-            this.RestaurantCard(item, false)
+            Text(this.isRestaurantLoading ? '正在加载餐厅' :
+              (this.restaurants.length === 0 ? '暂无餐厅数据' : '没有符合当前筛选的餐厅'))
+              .fontSize(14)
+              .fontColor(COLOR_MUTED)
+              .textAlign(TextAlign.Center)
+              .width('100%')
+              .padding({ top: 48, bottom: 48 })
           }
-        }, (item: Restaurant) => item.id)
+        } else {
+          ForEach(this.filteredRestaurants(), (item: Restaurant) => {
+            ListItem() {
+              this.RestaurantCard(item, false)
+            }
+          }, (item: Restaurant) => item.id)
+        }
+        if (this.isLoadingMoreRestaurants) {
+          ListItem() {
+            Text('正在加载更多餐厅').fontSize(12).fontColor(COLOR_MUTED).textAlign(TextAlign.Center)
+              .width('100%').padding({ top: 14, bottom: 14 })
+          }
+        } else if (!this.hasMoreRestaurants && this.restaurants.length > 0) {
+          ListItem() {
+            Text('已加载全部餐厅').fontSize(12).fontColor(COLOR_MUTED).textAlign(TextAlign.Center)
+              .width('100%').padding({ top: 14, bottom: 14 })
+          }
+        }
       }
       .padding({ left: 14, right: 14, top: 6, bottom: 16 })
       .layoutWeight(1)
       .scrollBar(BarState.Off)
       .width('100%')
+      .onReachEnd(() => this.loadMoreRestaurants())
     }
     .width('100%')
     .height('100%')
@@ -863,7 +1193,9 @@ struct Index {
         Column({ space: 16 }) {
           Column({ space: 8 }) {
             Text(this.detailRestaurant.name).fontSize(28).fontWeight(FontWeight.Bold).fontColor(Color.White).width('100%')
-            Text(`${this.detailRestaurant.cuisine} · ★ ${this.detailRestaurant.rating.toFixed(1)} · ¥${this.detailRestaurant.pricePerPerson}/人`)
+            Text(`${this.detailRestaurant.cuisine}` +
+              `${this.detailRestaurant.rating > 0 ? ` · ★ ${this.detailRestaurant.rating.toFixed(1)}` : ''}` +
+              `${this.detailRestaurant.pricePerPerson > 0 ? ` · ¥${this.detailRestaurant.pricePerPerson}/人` : ' · 人均待补充'}`)
               .fontSize(14).fontColor('#FFF4EE').width('100%')
             Text(this.detailRestaurant.address).fontSize(12).fontColor('#FFF4EE').width('100%')
           }
@@ -881,10 +1213,23 @@ struct Index {
           .padding(16).backgroundColor(Color.White).borderRadius(18).width('100%')
 
           Column({ space: 9 }) {
-            Text('菜单').fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+            Row() {
+              Text(`菜单${this.detailRestaurant.menuAvailable ? ` (${this.detailRestaurant.menu.length})` : ''}`)
+                .fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).layoutWeight(1)
+              if (this.detailRestaurant.menuAvailable) {
+                Button(this.detailMenuExpanded ? '收起' : '展开')
+                  .type(ButtonType.Normal)
+                  .height(30)
+                  .fontSize(12)
+                  .fontColor(COLOR_PRIMARY_DARK)
+                  .backgroundColor('#FFF0E8')
+                  .onClick(() => this.detailMenuExpanded = !this.detailMenuExpanded)
+              }
+            }
+            .width('100%')
             if (!this.detailRestaurant.menuAvailable) {
-              Text('暂无菜单，抵达后可拍照让小艺帮你选菜。').fontSize(13).fontColor(COLOR_MUTED).width('100%')
-            } else {
+              Text('暂无菜单，抵达后可拍照让助手帮你选菜。').fontSize(13).fontColor(COLOR_MUTED).width('100%')
+            } else if (this.detailMenuExpanded) {
               ForEach(this.detailRestaurant.menu, (item: MenuItem) => {
                 Row() {
                   Column({ space: 3 }) {
@@ -901,18 +1246,45 @@ struct Index {
             }
           }
           .padding(16).backgroundColor(Color.White).borderRadius(18).width('100%')
+
+          Column({ space: 10 }) {
+            Text(`用餐评价 (${this.detailRestaurant.reviews?.length ?? 0})`)
+              .fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+            if ((this.detailRestaurant.reviews?.length ?? 0) === 0) {
+              Text('暂无用餐评价').fontSize(13).fontColor(COLOR_MUTED).width('100%')
+            } else {
+              ForEach(this.detailRestaurant.reviews ?? [], (review: RestaurantReview) => {
+                Column({ space: 5 }) {
+                  Row() {
+                    if (review.rating > 0) {
+                      Text(`★ ${review.rating.toFixed(1)}`).fontSize(12).fontColor('#B36B00')
+                    }
+                    Blank()
+                    Text(review.createdAt.substring(0, 10)).fontSize(11).fontColor(COLOR_MUTED)
+                  }
+                  .width('100%')
+                  Text(review.text).fontSize(13).lineHeight(20).fontColor(COLOR_TEXT).width('100%')
+                }
+                .padding({ top: 9, bottom: 9 })
+                .border({ width: { bottom: 1 }, color: COLOR_LINE })
+                .width('100%')
+              }, (review: RestaurantReview) => review.id)
+            }
+          }
+          .padding(16).backgroundColor(Color.White).borderRadius(18).width('100%')
         }
         .padding({ left: 14, right: 14, bottom: 18 })
       }
       .layoutWeight(1)
       .scrollBar(BarState.Off)
 
-      Button('选择这家')
+      Button(this.restaurantActionLabel())
         .height(48)
         .width('92%')
         .fontSize(16)
-        .fontColor(Color.White)
-        .backgroundColor(COLOR_PRIMARY)
+        .fontColor(this.canSelectRestaurant() ? Color.White : COLOR_MUTED)
+        .backgroundColor(this.canSelectRestaurant() ? COLOR_PRIMARY : '#E6DED9')
+        .enabled(this.canSelectRestaurant() && !this.isLoading)
         .margin({ bottom: 12 })
         .onClick(() => this.selectRestaurant(this.detailRestaurant))
     }
