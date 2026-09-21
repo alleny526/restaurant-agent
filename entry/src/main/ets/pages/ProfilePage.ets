@@ -2,6 +2,7 @@ import { LengthMetrics } from '@kit.ArkUI';
 import { AuthUser, SessionState, UserProfile } from '../model/Models';
 import { AuthApi } from '../services/AuthApi';
 import { LoginPage } from './LoginPage';
+import { PreferenceEditPage } from './PreferenceEditPage';
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -18,6 +19,7 @@ export struct ProfilePage {
   onLoginPageChange: (show: boolean) => void = () => {};
 
   @State showLogin: boolean = false;
+  @State showPreferenceEditor: boolean = false;
   @State editNickname: string = '';
   @State editHometown: string = '';
   @State isLoading: boolean = false;
@@ -84,6 +86,22 @@ export struct ProfilePage {
     this.onLoginPageChange(false);
   }
 
+  private openPreferenceEditor(): void {
+    this.showPreferenceEditor = true;
+    this.onLoginPageChange(true);
+  }
+
+  private closePreferenceEditor(): void {
+    this.showPreferenceEditor = false;
+    this.onLoginPageChange(false);
+  }
+
+  private preferencesSaved(): void {
+    this.showPreferenceEditor = false;
+    this.onLoginPageChange(false);
+    this.notice = this.isLoggedIn() ? '饮食偏好已同步到账号' : '饮食偏好已更新';
+  }
+
   private logout(): void {
     this.authToken = '';
     this.profile = {
@@ -122,7 +140,7 @@ export struct ProfilePage {
     try {
       const user = await AuthApi.updateProfile(this.authToken, updated);
       this.applyUser(user);
-      this.notice = '资料与饮食偏好已保存';
+      this.notice = '个人资料已保存';
     } catch (error) {
       this.notice = (error as Error).message;
     } finally {
@@ -130,48 +148,26 @@ export struct ProfilePage {
     }
   }
 
-  private togglePreference(type: string, value: string): void {
-    let restrictions: string[] = this.profile.dietaryRestrictions;
-    let tastes: string[] = this.profile.tastePreferences;
-    let cuisines: string[] = this.profile.cuisinePreferences;
-    if (type === 'restriction') {
-      restrictions = restrictions.includes(value) ? restrictions.filter((item: string) => item !== value) :
-        restrictions.concat([value]);
-    } else if (type === 'taste') {
-      tastes = tastes.includes(value) ? tastes.filter((item: string) => item !== value) : tastes.concat([value]);
-    } else {
-      cuisines = cuisines.includes(value) ? cuisines.filter((item: string) => item !== value) : cuisines.concat([value]);
-    }
-    this.profile = {
-      userId: this.profile.userId,
-      nickname: this.profile.nickname,
-      phone: this.profile.phone,
-      hometown: this.profile.hometown,
-      dietaryRestrictions: restrictions,
-      tastePreferences: tastes,
-      cuisinePreferences: cuisines,
-      personalizationEnabled: this.profile.personalizationEnabled
-    } as UserProfile;
-  }
-
   @Builder
-  private PreferenceChip(label: string, selected: boolean, click: () => void) {
+  private PreferenceChip(label: string) {
     Text(label)
-      .fontSize(12).fontColor(selected ? Color.White : COLOR_MUTED)
+      .fontSize(12).fontColor(COLOR_PRIMARY_DARK)
       .padding({ left: 13, right: 13, top: 7, bottom: 7 })
-      .backgroundColor(selected ? COLOR_PRIMARY : '#FFF0E8').borderRadius(18).onClick(click)
+      .backgroundColor('#FFF0E8').borderRadius(18)
   }
 
   @Builder
-  private PreferenceSection(title: string, type: string, values: string[], selected: string[]) {
+  private PreferenceSummary(title: string, selected: string[]) {
     Column({ space: 9 }) {
       Text(title).fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT).width('100%')
-      Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
-        ForEach(values, (value: string) => {
-          this.PreferenceChip(value, selected.includes(value), () => this.togglePreference(type, value))
-        })
+      if (selected.length > 0) {
+        Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
+          ForEach(selected, (value: string) => this.PreferenceChip(value))
+        }
+        .width('100%')
+      } else {
+        Text('未设置').fontSize(12).fontColor('#A99A92')
       }
-      .width('100%')
     }
     .alignItems(HorizontalAlign.Start).width('100%')
   }
@@ -243,6 +239,9 @@ export struct ProfilePage {
               TextInput({ text: this.editHometown, placeholder: '籍贯（选填）' })
                 .height(46).backgroundColor('#FFFDFC').borderRadius(13)
                 .onChange((value: string) => this.editHometown = value)
+              Button(this.isLoading ? '保存中…' : '保存个人资料')
+                .width('100%').height(44).enabled(!this.isLoading).fontColor(Color.White)
+                .backgroundColor(COLOR_PRIMARY).borderRadius(14).onClick(() => this.saveProfile())
             }
             .padding(16).backgroundColor(Color.White).borderRadius(20).width('100%')
           }
@@ -255,18 +254,15 @@ export struct ProfilePage {
                   .fontSize(11).fontColor(COLOR_MUTED)
               }
               .alignItems(HorizontalAlign.Start).layoutWeight(1)
-              if (!this.isLoggedIn()) {
-                Text('登录同步').fontSize(12).fontColor(COLOR_PRIMARY_DARK).onClick(() => this.openLogin())
-              }
+              Button('编辑')
+                .type(ButtonType.Normal).height(34).fontSize(12).fontColor(COLOR_PRIMARY_DARK)
+                .backgroundColor('#FFF0E8').borderRadius(17).onClick(() => this.openPreferenceEditor())
             }
             .width('100%')
 
-            this.PreferenceSection('忌口 / 过敏原', 'restriction', ['花生', '海鲜', '乳制品', '牛肉'],
-              this.profile.dietaryRestrictions)
-            this.PreferenceSection('口味偏好', 'taste', ['清淡', '少油', '微辣', '鲜香'],
-              this.profile.tastePreferences)
-            this.PreferenceSection('菜系偏好', 'cuisine', ['江浙菜', '杭帮菜', '粤菜', '川菜', '素食'],
-              this.profile.cuisinePreferences)
+            this.PreferenceSummary('忌口 / 过敏原', this.profile.dietaryRestrictions)
+            this.PreferenceSummary('口味偏好', this.profile.tastePreferences)
+            this.PreferenceSummary('菜系偏好', this.profile.cuisinePreferences)
 
             Row() {
               Column({ space: 3 }) {
@@ -274,24 +270,10 @@ export struct ProfilePage {
                 Text('允许使用上述偏好参与排序').fontSize(11).fontColor(COLOR_MUTED)
               }
               .alignItems(HorizontalAlign.Start).layoutWeight(1)
-              Toggle({ type: ToggleType.Switch, isOn: this.profile.personalizationEnabled })
-                .selectedColor(COLOR_PRIMARY)
-                .onChange((value: boolean) => {
-                  this.profile = {
-                    userId: this.profile.userId, nickname: this.profile.nickname, phone: this.profile.phone,
-                    hometown: this.profile.hometown, dietaryRestrictions: this.profile.dietaryRestrictions,
-                    tastePreferences: this.profile.tastePreferences, cuisinePreferences: this.profile.cuisinePreferences,
-                    personalizationEnabled: value
-                  } as UserProfile;
-                })
+              Text(this.profile.personalizationEnabled ? '已开启' : '已关闭')
+                .fontSize(12).fontColor(this.profile.personalizationEnabled ? '#2E8B57' : COLOR_MUTED)
             }
             .padding({ top: 12 }).border({ width: { top: 1 }, color: COLOR_LINE }).width('100%')
-
-            if (this.isLoggedIn()) {
-              Button(this.isLoading ? '保存中…' : '保存修改')
-                .width('100%').height(44).enabled(!this.isLoading).fontColor(Color.White)
-                .backgroundColor(COLOR_PRIMARY).borderRadius(14).onClick(() => this.saveProfile())
-            }
           }
           .padding(16).backgroundColor(Color.White).borderRadius(20).width('100%')
 
@@ -330,6 +312,13 @@ export struct ProfilePage {
         authToken: this.authToken,
         onBack: () => this.closeLogin(),
         onLoginSuccess: (user: AuthUser) => this.loginSucceeded(user)
+      })
+    } else if (this.showPreferenceEditor) {
+      PreferenceEditPage({
+        profile: this.profile,
+        authToken: this.authToken,
+        onBack: () => this.closePreferenceEditor(),
+        onSaved: () => this.preferencesSaved()
       })
     } else {
       this.ProfileContent()
