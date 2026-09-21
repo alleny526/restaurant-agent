@@ -1,3 +1,4 @@
+.DS_Store
 .idea/
 .hvigor/
 **/build/
@@ -5,9 +6,20 @@
 **/node_modules/
 *.iml
 local.properties
-AppScope/resources/base/profile/agconnect-services.json
+agconnect-services.json
 signing-config.json5
-server/.env
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.p12
+*.p7b
+*.cer
+*.csr
+*.jks
+*.keystore
+*.pem
+*.key
 server/data/*.json
 server/data/*.sqlite
 server/data/*.sqlite-*

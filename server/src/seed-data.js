@@ -7,6 +7,5 @@ export function createSeedState() {
     processedRequests: [],
     reviews: [],
     users: [],
-    otpRequests: []
   };
 }
