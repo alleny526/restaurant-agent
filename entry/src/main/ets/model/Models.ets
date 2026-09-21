@@ -79,6 +79,22 @@ export interface UserProfile {
   personalizationEnabled: boolean;
 }
 
+export interface AuthUser {
+  id: string;
+  phone: string;
+  nickname: string;
+  hometown: string;
+  dietaryRestrictions: string[];
+  tastePreferences: string[];
+  cuisinePreferences: string[];
+  personalizationEnabled: boolean;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+
 export interface UserLocation {
   longitude: number;
   latitude: number;

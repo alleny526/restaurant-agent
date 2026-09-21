@@ -20,6 +20,7 @@ import { RestaurantAgentApi } from '../services/RestaurantAgentApi';
 import { AppConfig } from '../services/AppConfig';
 import { LocationService } from '../services/LocationService';
 import { PersistedConversation, SessionPersistence } from '../services/SessionPersistence';
+import { ProfilePage as UserProfilePage } from './ProfilePage';
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -64,6 +65,8 @@ struct Index {
   @State dishRecommendations: DishRecommendation[] = [];
   @State selectedMenuImages: MenuImage[] = [];
   @State notice: string = '';
+  @State authToken: string = '';
+  @State profileSubpageVisible: boolean = false;
   @State phoneInput: string = '';
   @State codeInput: string = '';
   @State isLoggedIn: boolean = false;
@@ -1355,12 +1358,19 @@ struct Index {
           } else if (this.selectedTab === 1) {
             this.ChatPage()
           } else {
-            this.ProfilePage()
+            UserProfilePage({
+              profile: this.profile,
+              session: this.session,
+              authToken: this.authToken,
+              onLoginPageChange: (show: boolean) => this.profileSubpageVisible = show
+            })
           }
         }
         .layoutWeight(1)
         .width('100%')
-        this.BottomNavigation()
+        if (!this.profileSubpageVisible) {
+          this.BottomNavigation()
+        }
       }
       .width('100%')
       .height('100%')
