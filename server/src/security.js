@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 function encode(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -23,14 +23,6 @@ export function verifyToken(token, secret, now = Date.now()) {
   } catch {
     return null;
   }
-}
-
-export function createOtp() {
-  return String(randomInt(100000, 1000000));
-}
-
-export function hashOtp(requestId, phone, code, secret) {
-  return createHmac('sha256', secret).update(`${requestId}:${phone}:${code}`).digest('hex');
 }
 
 export function randomSecret() {

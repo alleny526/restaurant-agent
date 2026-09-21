@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { JsonStore } from './store.js';
 import { RestaurantOrchestrator } from './orchestrator.js';
-import { ExplanationProvider, VisionProvider } from './providers.js';
+import { ExplanationProvider, HuaweiAccountProvider, VisionProvider } from './providers.js';
 import { filterRestaurants, parseDiningIntent, recommendRestaurants } from './recommendation.js';
-import { createOtp, hashOtp, issueToken, verifyToken } from './security.js';
+import { issueToken, verifyToken } from './security.js';
 
 function sendJson(response, statusCode, value, requestId, origin = '*') {
   response.writeHead(statusCode, {
@@ -47,6 +47,11 @@ function publicRestaurant(restaurant) {
   return { ...restaurant, recommendationReason: restaurant.recommendationReason ?? '' };
 }
 
+function publicUser(user) {
+  const { huaweiOpenId: _huaweiOpenId, huaweiUnionId: _huaweiUnionId, ...value } = user;
+  return value;
+}
+
 function authorizedUser(request, state, config) {
   const header = request.headers.authorization ?? '';
   const payload = verifyToken(header.startsWith('Bearer ') ? header.slice(7) : '', config.authSecret);
@@ -76,7 +81,9 @@ export async function createRestaurantServer(options = {}) {
     visionApiUrl: process.env.VISION_API_URL ?? '',
     visionApiKey: process.env.VISION_API_KEY ?? '',
     llmApiUrl: process.env.LLM_API_URL ?? '',
-    llmApiKey: process.env.LLM_API_KEY ?? ''
+    llmApiKey: process.env.LLM_API_KEY ?? '',
+    huaweiClientId: options.huaweiClientId ?? process.env.HUAWEI_CLIENT_ID ?? '',
+    huaweiClientSecret: options.huaweiClientSecret ?? process.env.HUAWEI_CLIENT_SECRET ?? ''
   };
   if (!config.demoMode && config.authSecret === 'development-secret-change-before-production') {
     throw new Error('生产环境必须配置强随机 AUTH_SECRET');
@@ -86,6 +93,7 @@ export async function createRestaurantServer(options = {}) {
     vision: new VisionProvider(config),
     explanation: new ExplanationProvider(config)
   });
+  const huaweiAccount = options.huaweiAccountProvider ?? new HuaweiAccountProvider(config);
 
   const server = createServer(async (request, response) => {
     const requestId = request.headers['x-request-id']?.toString() ?? randomUUID();
@@ -190,52 +198,41 @@ export async function createRestaurantServer(options = {}) {
         return;
       }
 
-      if (request.method === 'POST' && path === '/v1/auth/otp/request') {
+      if (request.method === 'POST' && path === '/v1/auth/huawei') {
         const body = await readJson(request);
-        if (!/^1\d{10}$/.test(body.phone ?? '')) {
-          throw Object.assign(new Error('请输入有效的 11 位手机号'), { statusCode: 400, code: 'INVALID_PHONE' });
-        }
-        const id = randomUUID();
-        const code = createOtp();
-        const otp = {
-          id, phone: body.phone, codeHash: hashOtp(id, body.phone, code, config.authSecret),
-          expiresAt: Date.now() + 5 * 60 * 1000, attempts: 0, used: false
-        };
-        await store.transaction((state) => {
-          state.otpRequests = state.otpRequests.filter((item) => item.expiresAt > Date.now() && !item.used);
-          state.otpRequests.push(otp);
-          return true;
-        });
-        sendJson(response, 200, { requestId: id, expiresInSeconds: 300, debugCode: config.demoMode ? code : '' }, requestId, origin);
-        return;
-      }
-
-      if (request.method === 'POST' && path === '/v1/auth/otp/verify') {
-        const body = await readJson(request);
+        const identity = await huaweiAccount.exchangeAuthorizationCode(body.authorizationCode);
         const user = await store.transaction((state) => {
-          const otp = state.otpRequests.find((item) => item.id === body.requestId && item.phone === body.phone);
-          if (!otp || otp.used || otp.expiresAt < Date.now() || otp.attempts >= 5) {
-            throw Object.assign(new Error('验证码已过期，请重新获取'), { statusCode: 401, code: 'OTP_EXPIRED' });
-          }
-          otp.attempts += 1;
-          if (otp.codeHash !== hashOtp(body.requestId, body.phone, body.code, config.authSecret)) {
-            throw Object.assign(new Error('验证码错误'), { statusCode: 401, code: 'OTP_INVALID' });
-          }
-          otp.used = true;
-          let profile = state.users.find((item) => item.phone === body.phone);
+          let profile = state.users.find((item) => item.huaweiUnionId === identity.unionId);
+          if (!profile) profile = state.users.find((item) => item.huaweiOpenId === identity.openId);
           if (!profile) {
             profile = {
-              id: randomUUID(), phone: body.phone, nickname: '新用户', hometown: '',
+              id: randomUUID(), phone: '', nickname: identity.nickname, hometown: '', avatarUrl: identity.avatarUrl,
               dietaryRestrictions: [], tastePreferences: ['清淡'], cuisinePreferences: [],
-              personalizationEnabled: true, deviceId: request.headers['x-device-id'] ?? '',
+              personalizationEnabled: true, authProvider: 'huawei', huaweiOpenId: identity.openId,
+              huaweiUnionId: identity.unionId, deviceId: request.headers['x-device-id'] ?? '',
               createdAt: new Date().toISOString()
             };
             state.users.push(profile);
+          } else {
+            if ((profile.huaweiUnionId && profile.huaweiUnionId !== identity.unionId) ||
+              (profile.huaweiOpenId && profile.huaweiOpenId !== identity.openId)) {
+              throw Object.assign(new Error('该本地账号已关联其他华为账号'), {
+                statusCode: 409, code: 'HUAWEI_ACCOUNT_CONFLICT'
+              });
+            }
+            profile.authProvider = 'huawei';
+            profile.huaweiOpenId = identity.openId;
+            profile.huaweiUnionId = identity.unionId;
+            profile.deviceId = request.headers['x-device-id'] ?? profile.deviceId ?? '';
+            if (identity.avatarUrl) profile.avatarUrl = identity.avatarUrl;
+            if (!profile.nickname && identity.nickname) profile.nickname = identity.nickname;
+            profile.updatedAt = new Date().toISOString();
           }
-          profile.deviceId = request.headers['x-device-id'] ?? profile.deviceId ?? '';
           return profile;
         });
-        sendJson(response, 200, { token: issueToken(user, config.authSecret), user }, requestId, origin);
+        sendJson(response, 200, {
+          token: issueToken(user, config.authSecret), user: publicUser(user)
+        }, requestId, origin);
         return;
       }
 
@@ -254,7 +251,14 @@ export async function createRestaurantServer(options = {}) {
           user.updatedAt = new Date().toISOString();
           return user;
         });
-        sendJson(response, 200, profile, requestId, origin);
+        sendJson(response, 200, publicUser(profile), requestId, origin);
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/v1/users/me/profile') {
+        const state = store.snapshot();
+        const current = authorizedUser(request, state, config);
+        sendJson(response, 200, publicUser(current), requestId, origin);
         return;
       }
 

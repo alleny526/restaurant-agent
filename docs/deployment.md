@@ -6,7 +6,7 @@
 - HarmonyOS 模拟器或已开启调试的真机。
 - Node.js 18+。若电脑未单独安装 Node.js，启动脚本会尝试使用 DevEco Studio 自带的 Node.js。
 
-本演示不需要华为开发者账号、Cloud Foundation、Cloud DB、云函数或公网服务器。
+餐厅推荐主流程不需要 Cloud Foundation、Cloud DB、云函数或公网服务器。测试华为账号登录需要按第 3 节配置 AppGallery Connect。
 
 ## 2. 启动端云交互
 
@@ -32,7 +32,19 @@ cd D:\RestaurantAgent\server
 npm start
 ```
 
-## 3. 演示流程
+## 3. 配置华为账号登录
+
+登录页使用 Account Kit 的标准华为账号登录，账号与密码由华为系统页面处理，应用不接触用户密码。客户端将一次性 Authorization Code 传给 Node 服务，Node 服务通过 `/oauth2/v3/token` 换取并校验 ID Token，最后使用 UnionID/OpenID 关联本地用户。
+
+1. 在 AppGallery Connect 创建 HarmonyOS 应用，包名必须与 `AppScope/app.json5` 的 `bundleName` 一致。
+2. 配置调试签名和公钥指纹，并获取 OAuth 2.0 Client ID 与 Client Secret。
+3. 将 Client ID 填入 `entry/src/main/resources/base/element/string.json` 的 `huawei_account_client_id`。
+4. 复制 `server/.env.example` 为 `server/.env`，填入同一 OAuth 客户端的 `HUAWEI_CLIENT_ID` 和 `HUAWEI_CLIENT_SECRET`。
+5. 用 DevEco Studio 的调试签名运行应用，不要直接安装 unsigned HAP。
+
+Client Secret 只能保存在 Node 服务端，不得写入 HarmonyOS 工程或提交到 Git。Client ID、包名、调试证书指纹必须属于同一 AGC 应用。
+
+## 4. 演示流程
 
 1. 对话：“想吃清淡的素食”或“人均 100 元以内的江浙菜”。
 2. 从推荐卡选择餐厅。
@@ -43,13 +55,13 @@ npm start
 
 运行数据位于 `server/data/runtime.json`。需要恢复初始数据时，停止服务后删除该文件，再次启动即可重新生成。
 
-## 4. 降级行为
+## 5. 降级行为
 
 - Node 服务未启动或端口未映射：端侧在短暂超时后自动使用 `MockAgent`，核心流程仍可演示。
 - 模拟器缺少系统级 Agent HSP：演示版不引用 Agent Framework Kit，使用“快捷推荐”按钮进入同一端云业务链路。
 - 上传图片：只用于演示交互，不调用真实 OCR，也不上传第三方平台。
 
-## 5. 构建与常见问题
+## 6. 构建与常见问题
 
 DevEco Studio 中使用 `Build > Build Hap(s)/APP(s) > Build Hap(s)`。命令行构建见根目录 README。
 

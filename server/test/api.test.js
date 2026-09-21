@@ -24,7 +24,26 @@ before(async () => {
     dataFile: join(tempDirectory, 'runtime.json'),
     authSecret: 'test-secret-that-is-long-enough-for-tests',
     demoMode: true,
-    xiaoyiApiKey: 'test-tool-key'
+    xiaoyiApiKey: 'test-tool-key',
+    huaweiAccountProvider: {
+      async exchangeAuthorizationCode(code) {
+        if (!['valid-huawei-code', 'conflict-id-code'].includes(code)) {
+          throw Object.assign(new Error('华为账号授权码校验失败，请重新授权'), {
+            statusCode: 401, code: 'HUAWEI_AUTH_FAILED'
+          });
+        }
+        if (code === 'conflict-id-code') {
+          return {
+            openId: 'another-huawei-open-id', unionId: 'huawei-union-id-1', phone: '',
+            nickname: '华为用户', avatarUrl: ''
+          };
+        }
+        return {
+          openId: 'huawei-open-id-1', unionId: 'huawei-union-id-1', phone: '',
+          nickname: '华为用户', avatarUrl: ''
+        };
+      }
+    }
   });
   await new Promise((resolve) => runtime.server.listen(0, '127.0.0.1', resolve));
   const address = runtime.server.address();
@@ -153,23 +172,18 @@ test('HarmonyOS demo endpoint preserves the end-to-end app contract', async () =
   assert.equal(reviewed.reviewSaved, true);
 });
 
-test('OTP login and profile update require a valid token', async () => {
-  const otp = await request('/v1/auth/otp/request', {
-    method: 'POST', body: JSON.stringify({ phone: '13800138000' })
+test('Huawei Account login and profile update require a valid token', async () => {
+  const signedIn = await request('/v1/auth/huawei', {
+    method: 'POST', body: JSON.stringify({ authorizationCode: 'valid-huawei-code' })
   });
-  assert.equal(otp.response.status, 200);
-  assert.equal(otp.body.debugCode.length, 6);
-
-  const verified = await request('/v1/auth/otp/verify', {
-    method: 'POST',
-    body: JSON.stringify({ requestId: otp.body.requestId, phone: '13800138000', code: otp.body.debugCode })
-  });
-  assert.equal(verified.response.status, 200);
-  assert.ok(verified.body.token.includes('.'));
+  assert.equal(signedIn.response.status, 200);
+  assert.ok(signedIn.body.token.includes('.'));
+  assert.equal(signedIn.body.user.authProvider, 'huawei');
+  assert.equal(signedIn.body.user.phone, '');
 
   const profile = await request('/v1/users/me/profile', {
     method: 'PUT',
-    headers: { authorization: `Bearer ${verified.body.token}` },
+    headers: { authorization: `Bearer ${signedIn.body.token}` },
     body: JSON.stringify({
       nickname: '小艺用户', hometown: '杭州', dietaryRestrictions: ['虾'],
       tastePreferences: ['清淡'], cuisinePreferences: ['江浙菜'], personalizationEnabled: true
@@ -179,10 +193,43 @@ test('OTP login and profile update require a valid token', async () => {
   assert.equal(profile.body.nickname, '小艺用户');
   assert.deepEqual(profile.body.dietaryRestrictions, ['虾']);
 
+  const restored = await request('/v1/users/me/profile', {
+    method: 'GET', headers: { authorization: `Bearer ${signedIn.body.token}` }
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.id, signedIn.body.user.id);
+  assert.equal(restored.body.hometown, '杭州');
+  assert.equal(restored.body.huaweiOpenId, undefined);
+
   const unauthorized = await request('/v1/users/me/profile', {
     method: 'PUT', body: JSON.stringify({ nickname: 'bad' })
   });
   assert.equal(unauthorized.response.status, 401);
+});
+
+test('Huawei Account login restores the same user and rejects conflicting identity data', async () => {
+  const first = await request('/v1/auth/huawei', {
+    method: 'POST', body: JSON.stringify({ authorizationCode: 'valid-huawei-code' })
+  });
+  const second = await request('/v1/auth/huawei', {
+    method: 'POST', body: JSON.stringify({ authorizationCode: 'valid-huawei-code' })
+  });
+  assert.equal(second.response.status, 200);
+  assert.equal(second.body.user.id, first.body.user.id);
+
+  const conflict = await request('/v1/auth/huawei', {
+    method: 'POST', body: JSON.stringify({ authorizationCode: 'conflict-id-code' })
+  });
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.code, 'HUAWEI_ACCOUNT_CONFLICT');
+});
+
+test('Huawei Account login rejects an invalid authorization code', async () => {
+  const result = await request('/v1/auth/huawei', {
+    method: 'POST', body: JSON.stringify({ authorizationCode: 'invalid-code' })
+  });
+  assert.equal(result.response.status, 401);
+  assert.equal(result.body.code, 'HUAWEI_AUTH_FAILED');
 });
 
 test('xiaoyi cloud tool returns no more than five grounded results', async () => {
