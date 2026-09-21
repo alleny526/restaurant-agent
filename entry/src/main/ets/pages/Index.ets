@@ -1,5 +1,4 @@
 import { BusinessError } from '@kit.BasicServicesKit';
-import { LengthMetrics } from '@kit.ArkUI';
 import {
   AgentRequest,
   AgentResponse,
@@ -15,6 +14,9 @@ import {
 import { MockAgent } from '../services/MockAgent';
 import { MenuImagePicker, PickedMenuImage } from '../services/MenuImagePicker';
 import { RestaurantAgentApi } from '../services/RestaurantAgentApi';
+import { ProfilePage } from './ProfilePage';
+
+PersistentStorage.persistProp('restaurantAgentAuthToken', '');
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -44,11 +46,8 @@ struct Index {
   @State dishRecommendations: DishRecommendation[] = [];
   @State selectedMenuImages: MenuImage[] = [];
   @State notice: string = '';
-  @State phoneInput: string = '';
-  @State codeInput: string = '';
-  @State isLoggedIn: boolean = false;
-  @State editNickname: string = '';
-  @State editHometown: string = '';
+  @State showAuthPage: boolean = false;
+  @StorageLink('restaurantAgentAuthToken') authToken: string = '';
   @State session: SessionState = {
     sessionId: `session-${Date.now()}`,
     stage: MealStage.PRE_MEAL,
@@ -226,63 +225,6 @@ struct Index {
     if (this.session.stage === MealStage.REVIEW) return '待评价';
     if (this.session.stage === MealStage.END) return '本次用餐已完成';
     return '餐前选店';
-  }
-
-  private togglePreference(type: string, value: string): void {
-    if (type === 'restriction') {
-      if (this.profile.dietaryRestrictions.includes(value)) {
-        this.profile.dietaryRestrictions = this.profile.dietaryRestrictions.filter((item: string) => item !== value);
-      } else {
-        this.profile.dietaryRestrictions = this.profile.dietaryRestrictions.concat([value]);
-      }
-    } else if (type === 'taste') {
-      if (this.profile.tastePreferences.includes(value)) {
-        this.profile.tastePreferences = this.profile.tastePreferences.filter((item: string) => item !== value);
-      } else {
-        this.profile.tastePreferences = this.profile.tastePreferences.concat([value]);
-      }
-    } else {
-      if (this.profile.cuisinePreferences.includes(value)) {
-        this.profile.cuisinePreferences = this.profile.cuisinePreferences.filter((item: string) => item !== value);
-      } else {
-        this.profile.cuisinePreferences = this.profile.cuisinePreferences.concat([value]);
-      }
-    }
-    this.profile = {
-      userId: this.profile.userId,
-      nickname: this.profile.nickname,
-      phone: this.profile.phone,
-      hometown: this.profile.hometown,
-      dietaryRestrictions: this.profile.dietaryRestrictions,
-      tastePreferences: this.profile.tastePreferences,
-      cuisinePreferences: this.profile.cuisinePreferences,
-      personalizationEnabled: this.profile.personalizationEnabled
-    } as UserProfile;
-  }
-
-  private login(): void {
-    if (!/^1\d{10}$/.test(this.phoneInput) || this.codeInput !== '123456') {
-      this.notice = '开发模式请输入 11 位手机号，验证码为 123456。';
-      return;
-    }
-    this.profile = {
-      userId: `user-${this.phoneInput.substring(7)}`,
-      nickname: this.editNickname.length > 0 ? this.editNickname : '小艺用户',
-      phone: this.phoneInput,
-      hometown: this.editHometown,
-      dietaryRestrictions: this.profile.dietaryRestrictions,
-      tastePreferences: this.profile.tastePreferences,
-      cuisinePreferences: this.profile.cuisinePreferences,
-      personalizationEnabled: true
-    } as UserProfile;
-    this.session = {
-      sessionId: this.session.sessionId,
-      stage: this.session.stage,
-      selectedRestaurantId: this.session.selectedRestaurantId,
-      userId: this.profile.userId
-    } as SessionState;
-    this.isLoggedIn = true;
-    this.notice = '登录成功。生产环境请在 AGC 启用认证服务并替换开发验证码。';
   }
 
   @Builder
@@ -733,122 +675,6 @@ struct Index {
   }
 
   @Builder
-  private PreferenceSection(title: string, type: string, values: string[], selected: string[]) {
-    Column({ space: 8 }) {
-      Text(title).fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT).width('100%')
-      Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
-        ForEach(values, (value: string) => {
-          this.Chip(value, selected.includes(value), () => this.togglePreference(type, value))
-        })
-      }
-      .width('100%')
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%')
-  }
-
-  @Builder
-  private ProfilePage() {
-    Column() {
-      this.PageHeader('我的', '偏好可选填，未登录也能使用基础推荐')
-      Scroll() {
-        Column({ space: 14 }) {
-          if (!this.isLoggedIn) {
-            Column({ space: 10 }) {
-              Text('手机号登录 / 注册').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-              TextInput({ text: this.phoneInput, placeholder: '请输入手机号' })
-                .type(InputType.PhoneNumber)
-                .onChange((value: string) => this.phoneInput = value)
-              TextInput({ text: this.codeInput, placeholder: '开发验证码：123456' })
-                .type(InputType.Number)
-                .onChange((value: string) => this.codeInput = value)
-              Button('登录 / 注册')
-                .width('100%')
-                .backgroundColor(COLOR_PRIMARY)
-                .onClick(() => this.login())
-              Text('生产环境需启用 AGC 认证服务，不应保留固定验证码。')
-                .fontSize(11).fontColor(COLOR_MUTED).width('100%')
-            }
-            .padding(16)
-            .backgroundColor(Color.White)
-            .borderRadius(20)
-            .width('100%')
-          } else {
-            Row({ space: 12 }) {
-              Text(this.profile.nickname.substring(0, 1))
-                .fontSize(24).fontWeight(FontWeight.Bold).fontColor(Color.White)
-                .width(52).height(52).textAlign(TextAlign.Center)
-                .backgroundColor(COLOR_PRIMARY).borderRadius(26)
-              Column({ space: 3 }) {
-                Text(this.profile.nickname).fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-                Text(this.profile.phone).fontSize(12).fontColor(COLOR_MUTED)
-              }
-              .alignItems(HorizontalAlign.Start)
-            }
-            .padding(16)
-            .backgroundColor(Color.White)
-            .borderRadius(20)
-            .width('100%')
-          }
-
-          Column({ space: 14 }) {
-            Text('饮食偏好').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-            this.PreferenceSection('忌口 / 过敏原', 'restriction', ['花生', '海鲜', '乳制品', '牛肉'],
-              this.profile.dietaryRestrictions)
-            this.PreferenceSection('口味偏好', 'taste', ['清淡', '少油', '微辣', '鲜香'],
-              this.profile.tastePreferences)
-            this.PreferenceSection('菜系偏好', 'cuisine', ['江浙菜', '杭帮菜', '粤菜', '川菜', '素食'],
-              this.profile.cuisinePreferences)
-            Row() {
-              Column({ space: 3 }) {
-                Text('个性化推荐').fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT)
-                Text('允许使用上述偏好参与排序').fontSize(11).fontColor(COLOR_MUTED)
-              }
-              .alignItems(HorizontalAlign.Start)
-              .layoutWeight(1)
-              Toggle({ type: ToggleType.Switch, isOn: this.profile.personalizationEnabled })
-                .selectedColor(COLOR_PRIMARY)
-                .onChange((value: boolean) => {
-                  this.profile.personalizationEnabled = value;
-                  this.profile = {
-                    userId: this.profile.userId,
-                    nickname: this.profile.nickname,
-                    phone: this.profile.phone,
-                    hometown: this.profile.hometown,
-                    dietaryRestrictions: this.profile.dietaryRestrictions,
-                    tastePreferences: this.profile.tastePreferences,
-                    cuisinePreferences: this.profile.cuisinePreferences,
-                    personalizationEnabled: value
-                  } as UserProfile;
-                })
-            }
-            .width('100%')
-          }
-          .padding(16)
-          .backgroundColor(Color.White)
-          .borderRadius(20)
-          .width('100%')
-
-          Column({ space: 8 }) {
-            Text('隐私与安全').fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-            Text('菜单识别可能遗漏过敏原；系统不会把模型猜测当作食材事实。你可以关闭个性化推荐，并在生产版本中申请删除个人数据。')
-              .fontSize(12).lineHeight(19).fontColor(COLOR_MUTED).width('100%')
-          }
-          .padding(16)
-          .backgroundColor('#FFF4DD')
-          .borderRadius(18)
-          .width('100%')
-        }
-        .padding({ left: 14, right: 14, bottom: 20 })
-      }
-      .scrollBar(BarState.Off)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .height('100%')
-  }
-
-  @Builder
   private DetailPage() {
     Column() {
       Row({ space: 12 }) {
@@ -983,12 +809,19 @@ struct Index {
           } else if (this.selectedTab === 1) {
             this.ChatPage()
           } else {
-            this.ProfilePage()
+            ProfilePage({
+              profile: this.profile,
+              session: this.session,
+              authToken: this.authToken,
+              onLoginPageChange: (show: boolean) => this.showAuthPage = show
+            })
           }
         }
         .layoutWeight(1)
         .width('100%')
-        this.BottomNavigation()
+        if (!this.showAuthPage) {
+          this.BottomNavigation()
+        }
       }
       .width('100%')
       .height('100%')

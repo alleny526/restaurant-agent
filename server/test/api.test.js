@@ -179,6 +179,13 @@ test('OTP login and profile update require a valid token', async () => {
   assert.equal(profile.body.nickname, '小艺用户');
   assert.deepEqual(profile.body.dietaryRestrictions, ['虾']);
 
+  const restored = await request('/v1/users/me/profile', {
+    method: 'GET', headers: { authorization: `Bearer ${verified.body.token}` }
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.id, verified.body.user.id);
+  assert.equal(restored.body.hometown, '杭州');
+
   const unauthorized = await request('/v1/users/me/profile', {
     method: 'PUT', body: JSON.stringify({ nickname: 'bad' })
   });

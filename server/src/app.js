@@ -258,6 +258,13 @@ export async function createRestaurantServer(options = {}) {
         return;
       }
 
+      if (request.method === 'GET' && path === '/v1/users/me/profile') {
+        const state = store.snapshot();
+        const current = authorizedUser(request, state, config);
+        sendJson(response, 200, current, requestId, origin);
+        return;
+      }
+
       if (request.method === 'DELETE' && path === '/v1/users/me') {
         const state = store.snapshot();
         const current = authorizedUser(request, state, config);
