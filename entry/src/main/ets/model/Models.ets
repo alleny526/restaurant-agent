@@ -78,12 +78,6 @@ export interface AuthUser {
   personalizationEnabled: boolean;
 }
 
-export interface OtpRequestResponse {
-  requestId: string;
-  expiresInSeconds: number;
-  debugCode: string;
-}
-
 export interface AuthResponse {
   token: string;
   user: AuthUser;

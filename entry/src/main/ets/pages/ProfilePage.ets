@@ -190,7 +190,8 @@ export struct ProfilePage {
         Column({ space: 5 }) {
           Text(this.isLoggedIn() ? (this.profile.nickname || '小艺用户') : '游客用户')
             .fontSize(20).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-          Text(this.isLoggedIn() ? this.profile.phone : '登录后同步个人资料与饮食偏好')
+          Text(this.isLoggedIn() ? (this.profile.phone.length > 0 ? this.profile.phone : '华为账号已登录') :
+            '登录后同步个人资料与饮食偏好')
             .fontSize(12).fontColor(COLOR_MUTED)
         }
         .alignItems(HorizontalAlign.Start).layoutWeight(1)

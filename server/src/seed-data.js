@@ -117,7 +117,5 @@ export function createSeedState() {
     sessions: [],
     reviews: [],
     users: [],
-    otpRequests: []
   };
 }
-

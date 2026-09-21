@@ -1,5 +1,5 @@
 import { http } from '@kit.NetworkKit';
-import { AuthResponse, AuthUser, OtpRequestResponse, UserProfile } from '../model/Models';
+import { AuthResponse, AuthUser, UserProfile } from '../model/Models';
 import { AppConfig } from './AppConfig';
 
 interface ErrorPayload {
@@ -52,14 +52,9 @@ export class AuthApi {
     }
   }
 
-  static requestOtp(phone: string): Promise<OtpRequestResponse> {
-    return AuthApi.request<OtpRequestResponse>('/v1/auth/otp/request', http.RequestMethod.POST,
-      JSON.stringify({ phone }));
-  }
-
-  static verifyOtp(requestId: string, phone: string, code: string): Promise<AuthResponse> {
-    return AuthApi.request<AuthResponse>('/v1/auth/otp/verify', http.RequestMethod.POST,
-      JSON.stringify({ requestId, phone, code }));
+  static loginWithHuawei(authorizationCode: string): Promise<AuthResponse> {
+    return AuthApi.request<AuthResponse>('/v1/auth/huawei', http.RequestMethod.POST,
+      JSON.stringify({ authorizationCode }));
   }
 
   static getProfile(token: string): Promise<AuthUser> {
