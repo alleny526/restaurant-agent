@@ -591,6 +591,35 @@ test('restaurant queries after selection use model keywords and AMap candidates'
   }
 });
 
+test('direct dish or store-name matches survive model candidate reranking', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'restaurant-agent-direct-match-'));
+  try {
+    const store = await new SqliteStore(join(directory, 'restaurants.sqlite')).init();
+    const exact = {
+      id: 'amap:炒饼店', externalPoiId: '炒饼店', source: 'amap', name: '西北特色炒饼',
+      address: '南京市测试路 1 号', location: { longitude: 118.79, latitude: 32.04 },
+      distanceMeters: 700, cuisines: ['中餐厅'], tags: [], averagePrice: 35, rating: 4.2,
+      isOpen: true, openStatusKnown: true, openingHours: '09:00-22:00', telephone: '', imageUrl: '',
+      reviewSummary: '', menu: [], dataUpdatedAt: new Date().toISOString()
+    };
+    const distractor = { ...exact, id: 'amap:distractor', externalPoiId: 'distractor', name: '普通餐厅' };
+    const orchestrator = new RestaurantOrchestrator(store, {
+      vision: {},
+      chat: {
+        analyzeIntent: async (_text, fallback) => ({ intent: fallback, usedModel: false }),
+        rankIds: async ({ candidates }) => ({
+          ids: candidates.map((item) => item.id).reverse(), usedModel: true
+        })
+      },
+      places: { isConfigured: () => true, search: async () => [exact, distractor] }
+    });
+    const result = await orchestrator.searchRestaurants('炒饼', '', 1);
+    assert.equal(result.restaurants[0].name, '西北特色炒饼');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('ordinary account registration and login issue the shared profile token', async () => {
   const registered = await request('/v1/auth/register', {
     method: 'POST', body: JSON.stringify({ nickname: '普通用户', account: 'DemoUser', password: 'secure123' })

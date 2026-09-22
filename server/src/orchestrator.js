@@ -205,6 +205,21 @@ function searchQueryVariants(query, intent, expanded = false) {
   return variants.slice(0, expanded ? 6 : 4);
 }
 
+function hasDirectIntentMatch(restaurant, intent) {
+  const terms = [...(intent.restaurantNames ?? []), ...(intent.dishes ?? []),
+    ...(intent.cuisines ?? []), ...(intent.tastes ?? [])]
+    .map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+  if (terms.length === 0) return false;
+  const haystack = [
+    restaurant.name,
+    restaurant.address,
+    ...(restaurant.cuisines ?? []),
+    ...(restaurant.tags ?? []),
+    ...(restaurant.menu ?? []).flatMap((item) => [item.name, ...(item.ingredients ?? []), ...(item.tags ?? [])])
+  ].join(' ').toLowerCase();
+  return terms.some((term) => haystack.includes(term));
+}
+
 function assertActionAllowed(action, stage) {
   const allowed = ACTION_ALLOWED_STAGES[action];
   if (allowed && !allowed.includes(stage)) {
@@ -380,10 +395,13 @@ export class RestaurantOrchestrator {
     });
     const state = this.store.snapshot();
     const profile = profileOverride ?? state.users.find((item) => item.id === userId) ?? null;
-    const databaseItems = await this.store.queryRestaurants({
-      openNow: intent.openNow,
-      maxPrice: intent.maxPrice ?? ''
-    });
+    // The public SQLite query intentionally limits pages to 200 rows. Chat
+    // search must inspect the full cache so a freshly refreshed AMap POI is
+    // not dropped just because it ranks below that page boundary.
+    const databaseItems = state.restaurants.filter((item) =>
+      (!intent.openNow || item.openStatusKnown === false || item.isOpen) &&
+      (intent.maxPrice === null || intent.maxPrice === undefined || intent.maxPrice === '' ||
+        item.averagePrice === 0 || item.averagePrice <= intent.maxPrice));
     const localKeywordMatches = databaseItems.filter((item) => {
       const haystack = [item.name, item.address, ...(item.cuisines ?? []), ...(item.tags ?? [])]
         .join(' ').toLowerCase();
@@ -413,7 +431,10 @@ export class RestaurantOrchestrator {
       limit: resultLimit
     }) ?? { ids: deterministic.map((item) => item.id).slice(0, resultLimit), usedModel: false };
     const byId = new Map(deterministic.map((item) => [item.id, item]));
-    const restaurants = rankResult.ids.map((id) => byId.get(id)).filter(Boolean);
+    const guaranteed = deterministic.filter((item) => hasDirectIntentMatch(item, intent));
+    const ranked = rankResult.ids.map((id) => byId.get(id)).filter(Boolean);
+    const restaurants = [...new Map([...guaranteed, ...ranked]
+      .map((item) => [item.id, item])).values()].slice(0, resultLimit);
     return {
       intent, restaurants, dataSource: refresh.source, warning: refresh.warning,
       modelUsed: intentResult.usedModel || rankResult.usedModel,
