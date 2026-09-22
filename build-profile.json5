@@ -1,9 +1,24 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\yangh\\.ohos\\config\\default_RestaurantAgent_auFjzoCp5wVa1oZ8BrZxuK6feu2ysOFl795rwlekgLM=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001A48B22BD634AE51103275B0AF8E6B19A7339B0C731D2907866E3679B555E7DE598C5720015283",
+          "profile": "C:\\Users\\yangh\\.ohos\\config\\default_RestaurantAgent_auFjzoCp5wVa1oZ8BrZxuK6feu2ysOFl795rwlekgLM=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\yangh\\.ohos\\config\\default_RestaurantAgent_auFjzoCp5wVa1oZ8BrZxuK6feu2ysOFl795rwlekgLM=.p12",
+          "storePassword": "0000001A32EBDC5FEA20DD4A1D2D39C4E0A5046138A1BC574801888CB53C9139880EEB1ECB26F219A6C1"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",
+        "signingConfig": "default",
         "compatibleSdkVersion": "6.0.0(20)",
         "targetSdkVersion": "6.1.1(24)",
         "runtimeOS": "HarmonyOS"

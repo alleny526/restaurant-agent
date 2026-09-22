@@ -18,7 +18,10 @@ export class MenuImagePicker {
     const names: Set<string> = new Set<string>();
     const pricePattern: RegExp = /^(.*?)[\s·.。…_\-]*(?:¥|￥)?\s*(\d{1,4}(?:\.\d{1,2})?)\s*(?:元|\/(?:份|例|位))?\s*$/;
     for (const rawLine of lines) {
-      const line: string = rawLine.replace(/\s+/g, ' ').trim();
+      // Dianping-style rows often contain a popularity marker such as
+      // “赞12” between the dish name and the right-aligned price.
+      const line: string = rawLine.replace(/(?:赞|👍)\s*\+?\s*\d+/gu, ' ')
+        .replace(/\s+/g, ' ').trim();
       const match: RegExpMatchArray | null = line.match(pricePattern);
       if (match === null) {
         continue;

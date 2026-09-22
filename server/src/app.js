@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { SqliteStore } from './store.js';
 import { AmapPlaceProvider } from './amap.js';
 import { RestaurantOrchestrator } from './orchestrator.js';
-import { ChatModelProvider, HuaweiAccountProvider, VisionProvider } from './providers.js';
+import { BaiduOcrProvider, ChatModelProvider, HuaweiAccountProvider, VisionProvider } from './providers.js';
 import {
   createOtp, hashOtp, hashPassword, issueToken, sanitizeReview, verifyPassword, verifyToken
 } from './security.js';
@@ -129,7 +129,10 @@ export async function createRestaurantServer(options = {}) {
     amapRadiusMeters: options.amapRadiusMeters ?? process.env.AMAP_RADIUS_METERS ?? 5000,
     amapCacheTtlSeconds: options.amapCacheTtlSeconds ?? process.env.AMAP_CACHE_TTL_SECONDS ?? 300,
     huaweiClientId: options.huaweiClientId ?? process.env.HUAWEI_CLIENT_ID ?? '',
-    huaweiClientSecret: options.huaweiClientSecret ?? process.env.HUAWEI_CLIENT_SECRET ?? ''
+    huaweiClientSecret: options.huaweiClientSecret ?? process.env.HUAWEI_CLIENT_SECRET ?? '',
+    baiduOcrAppId: options.baiduOcrAppId ?? process.env.BAIDU_OCR_APP_ID ?? '',
+    baiduOcrApiKey: options.baiduOcrApiKey ?? process.env.BAIDU_OCR_API_KEY ?? '',
+    baiduOcrSecretKey: options.baiduOcrSecretKey ?? process.env.BAIDU_OCR_SECRET_KEY ?? ''
   };
   if (!config.demoMode && config.authSecret === 'development-secret-change-before-production') {
     throw new Error('生产环境必须配置强随机 AUTH_SECRET');
@@ -142,6 +145,7 @@ export async function createRestaurantServer(options = {}) {
   const huaweiAccount = options.huaweiAccountProvider ?? new HuaweiAccountProvider(config);
   const orchestrator = new RestaurantOrchestrator(store, {
     vision: new VisionProvider(config),
+    ocr: new BaiduOcrProvider(config),
     chat,
     places: new AmapPlaceProvider(config, options.fetchImpl ?? globalThis.fetch),
     telemetry
@@ -169,8 +173,10 @@ export async function createRestaurantServer(options = {}) {
       if (request.method === 'GET' && path === '/healthz') {
         sendJson(response, 200, {
           status: 'ok', service: 'restaurant-agent', version: '2.0.0',
-          database: 'sqlite', amapConfigured: Boolean(config.amapWebKey), llmConfigured: chat.isConfigured(),
-          llmProvider: chat.providerName
+          database: 'sqlite', amapConfigured: Boolean(config.amapWebKey),
+          llmConfigured: chat.isConfigured(), llmProvider: chat.providerName,
+          baiduOcrConfigured: Boolean(config.baiduOcrApiKey && config.baiduOcrSecretKey),
+          menuUploadFlow: 'baidu-ocr-text-only-gpt-cleanup'
         }, requestId, origin);
         return;
       }

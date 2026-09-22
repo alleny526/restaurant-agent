@@ -228,7 +228,7 @@ export class SqliteStore {
     return structuredClone(this.state.restaurants.filter((item) => ids.has(item.id)));
   }
 
-  async upsertRestaurants(restaurants) {
+  async upsertRestaurants(restaurants, options = {}) {
     if (!Array.isArray(restaurants) || restaurants.length === 0) return [];
     return this.transaction((state) => {
       for (const incoming of restaurants) {
@@ -243,30 +243,41 @@ export class SqliteStore {
         else state.restaurants.push(merged);
       }
       return restaurants.map((item) => state.restaurants.find((saved) => saved.id === item.id));
-    });
+    }, { ...options, restaurantIds: restaurants.map((item) => item.id) });
   }
 
-  async transaction(fn) {
+  async transaction(fn, options = {}) {
     const run = async () => {
       const result = await fn(this.state);
-      await this.persist();
+      if (options.skipPersist === true) {
+        // A following chat transaction will persist the updated session.
+      } else await this.persist(options);
       return structuredClone(result);
     };
     this.writeQueue = this.writeQueue.then(run, run);
     return this.writeQueue;
   }
 
-  async persist() {
+  async persist(options = {}) {
     const database = this.database;
     database.run('BEGIN TRANSACTION');
     try {
       const restaurantIds = this.state.restaurants.map((item) => item.id);
-      if (restaurantIds.length > 0) {
-        database.run(`DELETE FROM restaurants WHERE id NOT IN (${restaurantIds.map(() => '?').join(',')})`, restaurantIds);
-      } else {
-        database.run('DELETE FROM restaurants');
+      const incrementalIds = Array.isArray(options.restaurantIds) ? new Set(options.restaurantIds) : null;
+      const persistRestaurants = options.persistRestaurants !== false;
+      if (persistRestaurants && incrementalIds === null) {
+        if (restaurantIds.length > 0) {
+          database.run(`DELETE FROM restaurants WHERE id NOT IN (${restaurantIds.map(() => '?').join(',')})`, restaurantIds);
+        } else {
+          database.run('DELETE FROM restaurants');
+        }
       }
-      for (const restaurant of this.state.restaurants) {
+      const restaurantsToPersist = persistRestaurants
+        ? (incrementalIds === null
+          ? this.state.restaurants
+          : this.state.restaurants.filter((item) => incrementalIds.has(item.id)))
+        : [];
+      for (const restaurant of restaurantsToPersist) {
         const document = restaurantDocument(restaurant);
         database.run(
           `INSERT INTO restaurants

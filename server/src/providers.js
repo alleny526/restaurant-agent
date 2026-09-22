@@ -4,6 +4,118 @@ function timeoutSignal(milliseconds) {
   return AbortSignal.timeout(milliseconds);
 }
 
+function parseBaiduMenuItems(wordsResult) {
+  const items = [];
+  const seen = new Set();
+  const headings = new Set(['推荐菜', '菜单', '文字菜单', '菜品', '价格', '荤菜', '素菜', '甜品', '小吃', '汤羹', '主食', '饮品', '其他菜品']);
+  let pendingNames = [];
+  let pendingPrice = null;
+  const addItem = (name, price, confidence = 0.76) => {
+    const normalizedName = String(name ?? '').replace(/(?:赞|👍)\s*\+?\s*\d+/gu, ' ')
+      .replace(/[\s·.。…_\-]+$/gu, '').replace(/\s+/g, ' ').trim();
+    const numericPrice = Number(price);
+    if (normalizedName.length < 2 || normalizedName.length > 100 || !Number.isFinite(numericPrice) ||
+      numericPrice < 0 || numericPrice > 2000 || headings.has(normalizedName) || seen.has(normalizedName) ||
+      !/[\u3400-\u9fff]/u.test(normalizedName)) return;
+    seen.add(normalizedName);
+    items.push({
+      id: `baidu-ocr-${items.length + 1}`, name: normalizedName, category: '待确认', price: numericPrice,
+      ingredients: [], tags: [], confidence
+    });
+  };
+  for (const entry of Array.isArray(wordsResult) ? wordsResult : []) {
+    const raw = String(entry?.words ?? '').replace(/\s+/g, ' ').trim();
+    if (!raw) continue;
+    const cleaned = raw.replace(/(?:赞|👍)\s*\+?\s*\d+/gu, ' ').replace(/\s+/g, ' ').trim();
+    if (!cleaned || headings.has(cleaned) || /^(?:菜单|菜品|价格|电话|地址|合计|总计)$/u.test(cleaned)) continue;
+
+    const inlinePrice = cleaned.match(/^(.*?)[\s·.。…_\-]*(?:¥|￥|Y)\s*(\d{1,4}(?:\.\d{1,2})?)(?:\s*元|\/(?:份|例|位))?\s*$/u);
+    if (inlinePrice) {
+      addItem([...pendingNames, inlinePrice[1]].join(' '), Number(inlinePrice[2]), /[¥￥Y元]/u.test(cleaned) ? 0.88 : 0.76);
+      pendingNames = [];
+      pendingPrice = null;
+      continue;
+    }
+    const standalonePrice = cleaned.match(/^(?:¥|￥|Y)\s*(\d{1,4}(?:\.\d{1,2})?)(?:\s*元|\/(?:份|例|位))?$/u);
+    if (standalonePrice) {
+      const price = Number(standalonePrice[1]);
+      if (pendingNames.length > 0) {
+        addItem(pendingNames.join(' '), price, 0.88);
+        pendingNames = [];
+      } else {
+        pendingPrice = price;
+      }
+      continue;
+    }
+    // Ignore status-bar fragments and other non-Chinese noise from screenshots.
+    if (!/[\u3400-\u9fff]/u.test(cleaned)) continue;
+    if (pendingPrice !== null) {
+      addItem(cleaned, pendingPrice, 0.82);
+      pendingPrice = null;
+    } else {
+      pendingNames.push(cleaned);
+    }
+    if (items.length >= 100) break;
+  }
+  return items;
+}
+
+export class BaiduOcrProvider {
+  constructor(config, fetchImpl = globalThis.fetch) {
+    this.appId = String(config.baiduOcrAppId ?? '');
+    this.apiKey = String(config.baiduOcrApiKey ?? '');
+    this.secretKey = String(config.baiduOcrSecretKey ?? '');
+    this.fetch = fetchImpl;
+    this.accessToken = '';
+    this.tokenExpiresAt = 0;
+  }
+
+  isConfigured() {
+    return this.apiKey.length > 0 && this.secretKey.length > 0;
+  }
+
+  async token() {
+    if (this.accessToken && this.tokenExpiresAt > Date.now() + 60_000) return this.accessToken;
+    const url = new URL('https://aip.baidubce.com/oauth/2.0/token');
+    url.searchParams.set('grant_type', 'client_credentials');
+    url.searchParams.set('client_id', this.apiKey);
+    url.searchParams.set('client_secret', this.secretKey);
+    const response = await this.fetch(url, { method: 'POST', signal: timeoutSignal(8000) });
+    if (!response.ok) throw new Error(`百度 OCR 鉴权失败（${response.status}）`);
+    const value = await response.json();
+    if (!value.access_token) throw new Error(`百度 OCR 鉴权失败：${value.error_description || value.error || '未知错误'}`);
+    this.accessToken = String(value.access_token);
+    this.tokenExpiresAt = Date.now() + Math.max(Number(value.expires_in) || 2_592_000, 300) * 1000;
+    return this.accessToken;
+  }
+
+  async recognize(images) {
+    if (!this.isConfigured() || !Array.isArray(images) || images.length === 0) {
+      return { usedOcr: false, items: [], provider: 'baidu-ocr' };
+    }
+    const accessToken = await this.token();
+    const items = [];
+    for (const image of images.slice(0, 3)) {
+      const body = new URLSearchParams({ image: String(image.base64 ?? '') });
+      const url = new URL('https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic');
+      url.searchParams.set('access_token', accessToken);
+      const response = await this.fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: timeoutSignal(15000)
+      });
+      if (!response.ok) throw new Error(`百度 OCR 请求失败（${response.status}）`);
+      const value = await response.json();
+      if (value.error_code) throw new Error(`百度 OCR 返回错误：${value.error_msg || value.error_code}`);
+      items.push(...parseBaiduMenuItems(value.words_result));
+    }
+    const unique = [...new Map(items.map((item) => [item.name, item])).values()].slice(0, 100);
+    if (unique.length === 0) throw new Error('百度 OCR 未识别到带价格的菜单行');
+    return { usedOcr: true, items: unique, provider: 'baidu-ocr' };
+  }
+}
+
 function decodeJwtPart(value) {
   return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
 }
@@ -298,9 +410,10 @@ export class ChatModelProvider {
               '你是菜单图片识别器，只输出 JSON。',
               '格式为 {"items":[{"id":"","name":"","category":"","price":0,"ingredients":[],"tags":[],"confidence":0}],"lowConfidenceFields":[],"reply":""}。',
               '只抄录图片中可见的菜名和价格；看不清时降低 confidence，不得凭常识补全食材。',
+              '大众点评样式中“赞+数字”是热度计数，不是菜名或价格；价格通常位于每行最右侧，请以最右侧价格为准并从菜名中去掉赞数字。',
               'reply 用不超过80字说明识别数量、低置信度字段和下一步点菜建议。',
               `用户偏好=${JSON.stringify(preferences)}`,
-              `端侧OCR参考=${JSON.stringify(deviceItems).slice(0, 12000)}`
+              `OCR文字参考（可能来自百度或端侧）=${JSON.stringify(deviceItems).slice(0, 12000)}`
             ].join('\n')
           },
           {
@@ -316,7 +429,7 @@ export class ChatModelProvider {
       if (!Array.isArray(parsed.items) || parsed.items.length === 0) throw new Error('未识别到菜单');
       const items = parsed.items.slice(0, 100).map((item, index) => ({
         id: String(item.id || `vision-${index + 1}`).slice(0, 128),
-        name: String(item.name || '').trim().slice(0, 100),
+        name: String(item.name || '').replace(/\s*(?:赞|👍)\s*\+?\s*\d+\s*$/u, '').trim().slice(0, 100),
         category: String(item.category || '待确认').trim().slice(0, 40),
         price: Math.max(0, Math.min(Number(item.price) || 0, 100000)),
         ingredients: Array.isArray(item.ingredients) ? item.ingredients.map(String).slice(0, 30) : [],
@@ -335,6 +448,58 @@ export class ChatModelProvider {
       };
     } catch (error) {
       console.warn('LLM vision unavailable, using OCR fallback:', error?.message ?? 'unknown error');
+      return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '',
+        model: this.model, durationMs: Date.now() - startedAt };
+    }
+  }
+
+  async cleanMenuOcr(deviceItems = [], preferences = null) {
+    if (!this.isConfigured() || !Array.isArray(deviceItems) || deviceItems.length === 0) {
+      return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '' };
+    }
+    const startedAt = Date.now();
+    try {
+      const content = await this.request({
+        messages: [
+          {
+            role: 'system',
+            content: [
+              '你是菜单 OCR 清理器，只处理 OCR 已返回的文字，不接收也不识别图片。只输出 JSON。',
+              '格式为 {"items":[{"id":"","name":"","category":"","price":0,"ingredients":[],"tags":[],"confidence":0}],"lowConfidenceFields":[],"reply":""}。',
+              '保留 OCR 中看得到的菜名和价格，不得新增 OCR 没有出现的菜品、食材或价格。',
+              '删除菜名或行中类似“赞12”“赞+12”“👍12”的热度计数；价格优先使用每行最右侧价格。',
+              `用户偏好=${JSON.stringify(preferences)}`,
+              `BAIDU_OCR_ITEMS=${JSON.stringify(deviceItems).slice(0, 16000)}`
+            ].join('\n')
+          },
+          { role: 'user', content: '清理并结构化以上百度 OCR 菜单结果。' }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 1200
+      });
+      const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
+      if (!Array.isArray(parsed.items) || parsed.items.length === 0) throw new Error('OCR 清理结果为空');
+      const items = parsed.items.slice(0, 100).map((item, index) => ({
+        id: String(item.id || `ocr-clean-${index + 1}`).slice(0, 128),
+        name: String(item.name || '').replace(/\s*(?:赞|👍)\s*\+?\s*\d+\s*$/u, '').trim().slice(0, 100),
+        category: String(item.category || '待确认').trim().slice(0, 40),
+        price: Math.max(0, Math.min(Number(item.price) || 0, 100000)),
+        ingredients: Array.isArray(item.ingredients) ? item.ingredients.map(String).slice(0, 30) : [],
+        tags: Array.isArray(item.tags) ? item.tags.map(String).slice(0, 20) : [],
+        confidence: Math.max(0, Math.min(Number(item.confidence) || 0.5, 1))
+      })).filter((item) => item.name.length > 0 && item.price > 0);
+      if (items.length === 0) throw new Error('OCR 清理后没有有效菜单项');
+      return {
+        usedModel: true,
+        items,
+        lowConfidenceFields: Array.isArray(parsed.lowConfidenceFields)
+          ? parsed.lowConfidenceFields.map(String).slice(0, 100) : [],
+        reply: typeof parsed.reply === 'string' ? parsed.reply.trim().slice(0, 300) : '',
+        model: this.model,
+        durationMs: Date.now() - startedAt
+      };
+    } catch {
       return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '',
         model: this.model, durationMs: Date.now() - startedAt };
     }

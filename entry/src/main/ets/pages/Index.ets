@@ -163,6 +163,11 @@ struct Index {
     await this.persistConversation();
   }
 
+  private switchTab(index: number): void {
+    if (index < 0 || index > 2 || index === this.selectedTab) return;
+    this.selectedTab = index;
+  }
+
   private async loadRestaurants(): Promise<void> {
     this.isRestaurantLoading = true;
     try {
@@ -307,6 +312,25 @@ struct Index {
         this.selectedMenuImages = [];
         this.restaurantSwitchMode = false;
       }
+      if (request.action === 'upload_menu') {
+        // The upload node is dedicated to confirmation. Hide stale
+        // personalized cards while the newly recognized menu is pending.
+        this.messages = this.messages.map((item: ChatMessage) => {
+          return {
+            id: item.id, role: item.role, text: item.text, timestamp: item.timestamp,
+            restaurants: item.restaurants, recognizedMenu: [], dishRecommendations: []
+          } as ChatMessage;
+        });
+      }
+      if (request.action === 'confirm_menu') {
+        // Once confirmed, replace all pending-menu cards with the advice card.
+        this.messages = this.messages.map((item: ChatMessage) => {
+          return {
+            id: item.id, role: item.role, text: item.text, timestamp: item.timestamp,
+            restaurants: item.restaurants, recognizedMenu: [], dishRecommendations: item.dishRecommendations
+          } as ChatMessage;
+        });
+      }
       if (request.action === 'chat' && request.state.selectedRestaurantId.length > 0 &&
         response.restaurants.length > 0 && request.state.stage !== MealStage.REVIEW) {
         this.restaurantSwitchMode = true;
@@ -315,8 +339,10 @@ struct Index {
         await this.restartConversation('评价已保存，已为你开始新的对话。');
         return response;
       }
-      this.appendMessage('agent', response.reply, response.restaurants, response.recognizedMenu,
-        response.dishRecommendations);
+      const menuCard: MenuItem[] = request.action === 'confirm_menu' ? [] : response.recognizedMenu;
+      const adviceCard: DishRecommendation[] = request.action === 'upload_menu'
+        ? [] : response.dishRecommendations;
+      this.appendMessage('agent', response.reply, response.restaurants, menuCard, adviceCard);
       return response;
     } catch (error) {
       const message: string = (error as Error).message;
@@ -389,9 +415,7 @@ struct Index {
           mimeType: picked.mimeType,
           base64: picked.base64
         } as MenuImage];
-      const uploadText: string = picked.recognizedMenu.length > 0
-        ? `已上传菜单照片，识别到 ${picked.recognizedMenu.length} 道菜。`
-        : '已上传菜单照片，正在识别菜名和价格。';
+      const uploadText: string = '已上传菜单照片，正在分析菜名、价格和食材。';
       this.appendMessage('user', uploadText);
       await this.execute(this.createRequest('upload_menu'));
     } catch (error) {
@@ -1241,9 +1265,6 @@ struct Index {
               ForEach(this.detailRestaurant.reviews ?? [], (review: RestaurantReview) => {
                 Column({ space: 5 }) {
                   Row() {
-                    if (review.rating > 0) {
-                      Text(`★ ${review.rating.toFixed(1)}`).fontSize(12).fontColor('#B36B00')
-                    }
                     Blank()
                     Text(`${review.authorName ?? '匿名用户'} · ${this.formatBeijingTime(review.createdAt)}`)
                       .fontSize(11).fontColor(COLOR_MUTED)
@@ -1329,7 +1350,7 @@ struct Index {
     .layoutWeight(1)
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .onClick(() => this.selectedTab = index)
+    .onClick(() => this.switchTab(index))
   }
 
   private twoDigits(value: number): string {
@@ -1388,21 +1409,23 @@ struct Index {
   build() {
     Navigation(this.pageStack) {
       Column() {
-        Column() {
-          if (this.selectedTab === 0) {
-            this.DiscoverPage()
-          } else if (this.selectedTab === 1) {
-            this.ChatPage()
-          } else {
-            ProfilePage({
-              profile: this.profile,
-              session: this.session,
-              authToken: this.authToken,
-              activeSubpage: '',
-              onSubpageChange: (name: string) => this.openProfileSubpage(name)
-            })
-          }
+        Swiper() {
+          this.DiscoverPage()
+          this.ChatPage()
+          ProfilePage({
+            profile: this.profile,
+            session: this.session,
+            authToken: this.authToken,
+            activeSubpage: '',
+            onSubpageChange: (name: string) => this.openProfileSubpage(name)
+          })
         }
+        .index(this.selectedTab)
+        .indicator(false)
+        .loop(false)
+        .duration(260)
+        .curve(Curve.EaseOut)
+        .onChange((index: number) => this.selectedTab = index)
         .layoutWeight(1)
         .width('100%')
         this.BottomNavigation()

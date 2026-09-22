@@ -8,10 +8,10 @@
 - 对话页：自然语言提取店名、菜品、菜系、口味、人均、距离、评分和营业要求；候选通过高德与 SQLite 查询后再排序。
 - 连续用餐流程：`PRE_MEAL → RESTAURANT_SELECTED → ARRIVED → MENU_READY → DINING → REVIEW → END`。
 - 换店流程：评价前任意阶段可以自然语言要求换店；返回候选时保留原餐厅节点，并提供“不用换了”恢复当前节点，选择新店后清空旧餐厅对话并开始新流程。
-- 菜单识别：端侧 Core Vision Kit OCR 与云端视觉模型并行准备；云端不可用时保留端侧 OCR 结果，低置信度字段要求确认。
+- 菜单识别：端侧 Core Vision Kit OCR 作为前置/回退；云端优先调用百度通用文字识别，GPT 只接收百度或端侧 OCR 文本进行清理和结构化，不接收菜单图片。百度与端侧 OCR 均无有效结果时返回明确错误，不显示预置菜单。
 - 账户与资料：普通账号注册/登录、华为账号登录、头像、昵称、籍贯、忌口、口味和菜系偏好统一编辑；评论按用户和时间戳独立保存。
 - 商家图片：高德 `show_fields=business,photos` 图片用于卡片和详情展示；只有标题明确标注菜单/菜谱/价目表的图片才会尝试识别菜单。
-- 二级页面：使用 `Navigation/NavPathStack`，支持华为侧边返回；详情和登录等页面使用简单左右滑动过渡。
+- 页面切换：发现、对话、我的三个一级页面由原生 `Swiper` 承载，支持底部导航按钮和手指左右滑动；滑动过程中相邻页面同时渲染并连续跟手移动，使用轻量左右滑入动效；二级页面使用 `Navigation/NavPathStack`，继续支持华为侧边返回和系统 `SLIDE_RIGHT` 转场。
 
 ## 端云链路
 
@@ -23,11 +23,11 @@ HarmonyOS ArkUI
               └─ Node.js 编排服务 :8787
                   ├─ 会话状态机、SQLite、评论和资料
                   ├─ 高德 Web 服务 POI/图片
-                  ├─ OpenAI-compatible LLM：意图解析、候选重排、回复、视觉识别
+                  ├─ OpenAI-compatible LLM：意图解析、候选重排、回复、OCR 文本清理
                   └─ 固定流程校验、字段校验、脱敏和幂等
 ```
 
-模型只负责意图解析、候选 ID 重排、用户可见回复和图片识别；商家事实、菜单写入、会话跳转、评论保存和权限校验由 Node 服务执行。客户端网络失败时才进入明确标注的本地演示降级，不把降级结果伪装成云端成功。
+模型只负责意图解析、候选 ID 重排、用户可见回复和 OCR 文本清理；菜单上传链路不调用 GPT 视觉识别。商家事实、菜单写入、会话跳转、评论保存和权限校验由 Node 服务执行。客户端网络失败时才进入明确标注的本地演示降级，不把降级结果伪装成云端成功。
 
 ## 工程结构
 
@@ -58,9 +58,12 @@ LLM_API_KEY=服务端专用Key
 LLM_MODEL=gpt-5.6-sol
 LLM_FAST_MODEL=gpt-5.6-luna
 LLM_TIMEOUT_MS=20000
+BAIDU_OCR_APP_ID=百度OCR应用ID
+BAIDU_OCR_API_KEY=百度OCR API Key
+BAIDU_OCR_SECRET_KEY=百度OCR Secret Key
 ```
 
-可选配置：`AMAP_LOCATION=经度,纬度` 开启固定周边检索；留空时按南京市文本检索。`HUAWEI_CLIENT_ID` 和 `HUAWEI_CLIENT_SECRET` 放在服务端，用于华为账号登录。`VISION_API_URL`、`VISION_API_KEY` 用于接入兼容视觉服务；不配置时仍保留端侧 OCR 和演示识别器。
+可选配置：`AMAP_LOCATION=经度,纬度` 开启固定周边检索；留空时按南京市文本检索。`HUAWEI_CLIENT_ID` 和 `HUAWEI_CLIENT_SECRET` 放在服务端，用于华为账号登录。`VISION_API_URL`、`VISION_API_KEY` 仅用于可选的详情图片识别路径，不参与用户上传菜单流程。菜单上传必须配置百度 OCR 的 API Key 和 Secret Key；AppID 用于记录应用配置，百度鉴权实际使用 API Key 与 Secret Key。
 
 API Key、华为 Client Secret 和 Cloudflare 凭据不能写入 ArkTS、不能提交 Git。完整字段见 [`server/.env.example`](server/.env.example)。
 
@@ -78,7 +81,7 @@ cd D:\RestaurantAgent\server
 npm run public-gateway
 ```
 
-检查 `http://127.0.0.1:8787/healthz` 或 `http://127.0.0.1:8788/healthz`。`amapConfigured: true`、`llmConfigured: true` 表示外部配置已加载。
+检查 `http://127.0.0.1:8787/healthz` 或 `http://127.0.0.1:8788/healthz`。`amapConfigured: true`、`llmConfigured: true`、`baiduOcrConfigured: true` 表示对应外部配置已加载；`menuUploadFlow` 应为 `baidu-ocr-text-only-gpt-cleanup`。
 
 ### 3. Cloudflare HTTPS
 
@@ -114,13 +117,13 @@ cd D:\RestaurantAgent\server
 npm test
 ```
 
-服务端测试覆盖 SQLite 持久化、高德归一化和图片、自然语言意图、距离/评分过滤、状态机、换店、OCR/视觉降级、认证、评论、幂等和模型适配。仅本机可访问的 `GET /internal/diagnostics` 只返回脱敏计数和耗时。
+服务端测试覆盖 SQLite 持久化、高德归一化和图片、自然语言意图、距离/评分过滤、状态机、换店、OCR 降级、认证、评论、幂等和模型适配，共 36 项。仅本机可访问的 `GET /internal/diagnostics` 只返回脱敏计数和耗时。
 
 ## 适配性与限制
 
 - 支持 HarmonyOS Stage 模型和手机真机/模拟器；端侧 OCR 能力依赖设备 Core Vision Kit 支持情况。
 - 高德 POI、图片、营业时间和评分以 API 实际返回为准；无数据时不由模型补造。
-- 菜单只来自自有/授权数据、用户照片 OCR 或视觉识别，不接入未授权外卖平台菜单。
+- 菜单只来自自有/授权数据、用户照片的百度 OCR/端侧 OCR 结果，不接入未授权外卖平台菜单；GPT 不直接读取菜单图片。
 - 小艺开放平台适合作为系统入口或 Agent Server 调用方；当前应用主对话链路使用 OpenAI-compatible API，避免依赖个人开发者不可上架的私有云插件。
 - 本项目是 toy project，不包含支付、团购、预约、导航、生产级短信、生产监控和正式商店发布材料。
 
