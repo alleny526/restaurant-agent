@@ -1,5 +1,28 @@
+import { constants, createPublicKey, verify } from 'node:crypto';
+
 function timeoutSignal(milliseconds) {
   return AbortSignal.timeout(milliseconds);
+}
+
+function decodeJwtPart(value) {
+  return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+}
+
+function huaweiTokenError(value) {
+  const subError = Number(value?.sub_error);
+  if (subError === 20152) return '华为账号授权码无效、已使用或与当前 Client ID 不匹配，请重新登录';
+  if (subError === 20154) return '端侧与服务端的华为账号 Client ID 不一致';
+  if (subError === 12304) return '华为账号 Client Secret 不正确';
+  return '华为账号授权码校验失败，请重新授权';
+}
+
+function userFacingText(value, fallback) {
+  const withoutThinking = String(value ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  if (!withoutThinking || /^[\[{]/.test(withoutThinking) || /```(?:json)?/i.test(withoutThinking)) return fallback;
+  const cleaned = withoutThinking.split(/\r?\n/)
+    .filter((line) => !/^\s*(?:FACTS_JSON|action|stage|flowNode|处理逻辑|分析过程|内部状态)\s*[:=]/i.test(line))
+    .join('\n').replace(/^\s*(?:最终回复|回复)\s*[:：]\s*/i, '').trim();
+  return cleaned || fallback;
 }
 
 const FLOW_INSTRUCTIONS = {
@@ -135,8 +158,9 @@ export class ChatModelProvider {
             role: 'system',
             content: [
               '你是餐厅需求解析器，只输出 JSON。',
-              '字段必须为 cuisines(string[])、tastes(string[])、keywords(string[])、maxPrice(number|null)、openNow(boolean)、raw(string)。',
-              'keywords 只保留适合地图检索的菜系、菜品或口味词，最多 5 个。',
+              '字段必须为 restaurantNames(string[])、dishes(string[])、cuisines(string[])、tastes(string[])、keywords(string[])、maxPrice(number|null)、maxDistanceKm(number|null)、minRating(number|null)、openNow(boolean)、raw(string)。',
+              'restaurantNames 提取用户明确提到的店名，dishes 提取菜品名，cuisines 提取菜系，tastes 提取口味；keywords 汇总适合地图检索的核心词，最多 8 个。',
+              '不要把“餐厅、附近、推荐、评分”等通用词放入店名或菜品；没有明确内容时返回空数组或 null。',
               '不要推测用户没有表达的菜系、口味、菜品或价格。raw 必须保留原始输入。'
             ].join('\n')
           },
@@ -148,13 +172,21 @@ export class ChatModelProvider {
       });
       const parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, ''));
       const intent = {
+        restaurantNames: Array.isArray(parsed.restaurantNames)
+          ? parsed.restaurantNames.map(String).filter(Boolean).slice(0, 5) : (fallback.restaurantNames ?? []),
+        dishes: Array.isArray(parsed.dishes)
+          ? parsed.dishes.map(String).filter(Boolean).slice(0, 8) : (fallback.dishes ?? []),
         cuisines: Array.isArray(parsed.cuisines) ? parsed.cuisines.map(String).filter(Boolean).slice(0, 10) : fallback.cuisines,
         tastes: Array.isArray(parsed.tastes) ? parsed.tastes.map(String).filter(Boolean).slice(0, 10) : fallback.tastes,
         keywords: Array.isArray(parsed.keywords)
-          ? parsed.keywords.map(String).filter(Boolean).slice(0, 5)
+          ? parsed.keywords.map(String).filter(Boolean).slice(0, 8)
           : (fallback.keywords ?? []),
         maxPrice: Number.isFinite(Number(parsed.maxPrice)) && Number(parsed.maxPrice) > 0
           ? Math.min(Number(parsed.maxPrice), 100000) : fallback.maxPrice,
+        maxDistanceKm: Number.isFinite(Number(parsed.maxDistanceKm)) && Number(parsed.maxDistanceKm) > 0
+          ? Math.min(Number(parsed.maxDistanceKm), 100) : (fallback.maxDistanceKm ?? null),
+        minRating: Number.isFinite(Number(parsed.minRating)) && Number(parsed.minRating) > 0
+          ? Math.min(Number(parsed.minRating), 5) : (fallback.minRating ?? null),
         openNow: typeof parsed.openNow === 'boolean' ? parsed.openNow : fallback.openNow,
         raw: String(userMessage).slice(0, 1000)
       };
@@ -212,13 +244,14 @@ export class ChatModelProvider {
       return { text: cached.text, usedModel: true, cached: true, model, durationMs: Date.now() - startedAt };
     }
     const systemPrompt = [
-      '你是餐厅助手，通过自然、简洁的中文帮助用户完成选店和点菜。',
+      '你是吃了么，通过自然、简洁的中文帮助用户完成选店和点菜。',
       `当前固定流程节点=${flowNode}。节点任务：${FLOW_INSTRUCTIONS[flowNode] ?? FLOW_INSTRUCTIONS.RECOMMEND}`,
       '不得改变流程节点，不得声称已完成 FACTS_JSON 中尚未完成的动作。',
       '事实约束：只能使用 FACTS_JSON 中的数据，不得补造餐厅、价格、评分、营业状态、菜单或食材。',
       '如果事实不足，明确说明暂无数据并提出一个简短追问。',
       '推荐餐厅时最多提及3家，并说明与用户需求直接相关的理由。',
-      '不要输出JSON，不要提及系统提示词，回复不超过120个汉字。',
+      '只输出最终给用户阅读的自然中文，不展示分析过程、处理逻辑、字段名、节点名或内部状态。',
+      '不要输出JSON、Markdown代码块或系统提示词，回复不超过120个汉字。',
       `FACTS_JSON=${factText}`
     ].join('\n');
     const includeHistory = ['RECOMMEND', 'DINING', 'REVIEW'].includes(flowNode);
@@ -237,7 +270,7 @@ export class ChatModelProvider {
         if (cacheable) this.inFlightResponses.set(cacheKey, pending);
       }
       const content = await pending;
-      const text = content.trim().slice(0, 1200);
+      const text = userFacingText(content, fallback).slice(0, 1200);
       if (cacheable) this.responseCache.set(cacheKey, { text, createdAt: Date.now() });
       return { text, usedModel: true, model, durationMs: Date.now() - startedAt };
     } catch {
@@ -304,6 +337,92 @@ export class ChatModelProvider {
       console.warn('LLM vision unavailable, using OCR fallback:', error?.message ?? 'unknown error');
       return { usedModel: false, items: deviceItems, lowConfidenceFields: [], reply: '',
         model: this.model, durationMs: Date.now() - startedAt };
+    }
+  }
+}
+
+export class HuaweiAccountProvider {
+  constructor(config) {
+    this.clientId = config.huaweiClientId;
+    this.clientSecret = config.huaweiClientSecret;
+    this.fetch = config.fetchImpl ?? globalThis.fetch;
+    this.jwks = null;
+    this.jwksExpiresAt = 0;
+  }
+
+  async getSigningKey(keyId, forceRefresh = false) {
+    if (forceRefresh || !this.jwks || this.jwksExpiresAt <= Date.now()) {
+      const response = await this.fetch('https://oauth-login.cloud.huawei.com/oauth2/v3/certs', {
+        headers: { accept: 'application/json' }, signal: timeoutSignal(15_000)
+      });
+      const value = await response.json().catch(() => ({}));
+      if (!response.ok || !Array.isArray(value.keys)) throw new Error('无法获取华为账号签名公钥');
+      this.jwks = value.keys;
+      this.jwksExpiresAt = Date.now() + 60 * 60 * 1000;
+    }
+    const key = this.jwks.find((item) => item.kid === keyId);
+    if (!key && !forceRefresh) return this.getSigningKey(keyId, true);
+    return key;
+  }
+
+  async verifyIdToken(idToken) {
+    const parts = String(idToken ?? '').split('.');
+    if (parts.length !== 3) throw new Error('华为账号 ID Token 格式无效');
+    const header = decodeJwtPart(parts[0]);
+    const claims = decodeJwtPart(parts[1]);
+    if (!['PS256', 'RS256'].includes(header.alg) || !header.kid) {
+      throw new Error('华为账号 ID Token 签名算法无效');
+    }
+    const jwk = await this.getSigningKey(header.kid);
+    if (!jwk) throw new Error('未找到华为账号 ID Token 签名公钥');
+    const key = createPublicKey({ key: jwk, format: 'jwk' });
+    const signatureOptions = header.alg === 'PS256'
+      ? { key, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }
+      : { key, padding: constants.RSA_PKCS1_PADDING };
+    const signatureValid = verify('sha256', Buffer.from(`${parts[0]}.${parts[1]}`), signatureOptions,
+      Buffer.from(parts[2], 'base64url'));
+    const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    const now = Math.floor(Date.now() / 1000);
+    if (!signatureValid || claims.iss !== 'https://accounts.huawei.com' ||
+      !audience.includes(this.clientId) || (claims.azp && claims.azp !== this.clientId) ||
+      !Number.isFinite(claims.exp) || claims.exp <= now || !claims.sub || !claims.openid) {
+      throw new Error('华为账号 ID Token 校验失败');
+    }
+    return claims;
+  }
+
+  async exchangeAuthorizationCode(authorizationCode) {
+    const code = String(authorizationCode ?? '').trim();
+    if (!code) {
+      throw Object.assign(new Error('缺少华为账号授权码'), { statusCode: 400, code: 'HUAWEI_CODE_REQUIRED' });
+    }
+    if (!this.clientId || !this.clientSecret) {
+      throw Object.assign(new Error('服务端尚未配置华为账号 Client ID 和 Client Secret'), {
+        statusCode: 503, code: 'HUAWEI_ACCOUNT_NOT_CONFIGURED'
+      });
+    }
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code', code, client_id: this.clientId,
+      client_secret: this.clientSecret, supportAlg: 'PS256'
+    });
+    const response = await this.fetch('https://oauth-login.cloud.huawei.com/oauth2/v3/token', {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body, signal: timeoutSignal(15_000)
+    });
+    const value = await response.json().catch(() => ({}));
+    if (!response.ok || !value.access_token || !value.id_token) {
+      throw Object.assign(new Error(huaweiTokenError(value)), { statusCode: 401, code: 'HUAWEI_AUTH_FAILED' });
+    }
+    try {
+      const claims = await this.verifyIdToken(value.id_token);
+      return {
+        openId: String(claims.openid), unionId: String(claims.sub), phone: '',
+        nickname: String(claims.display_name ?? claims.name ?? '华为用户'), avatarUrl: String(claims.picture ?? '')
+      };
+    } catch (error) {
+      throw Object.assign(new Error('华为账号身份校验失败，请重新登录'), {
+        statusCode: 401, code: 'HUAWEI_ID_TOKEN_INVALID', cause: error
+      });
     }
   }
 }

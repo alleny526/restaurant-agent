@@ -8,6 +8,7 @@ import { AmapPlaceProvider, amapInternals } from '../src/amap.js';
 import { RestaurantOrchestrator } from '../src/orchestrator.js';
 import { isAllowedPublicRoute } from '../src/public-gateway-policy.js';
 import { ChatModelProvider, VisionProvider } from '../src/providers.js';
+import { parseDiningIntent, recommendRestaurants } from '../src/recommendation.js';
 import { SqliteStore } from '../src/store.js';
 import { testRestaurants } from '../test-support/fixtures.js';
 
@@ -76,16 +77,24 @@ test('AMap POI responses are normalized without inventing menu data', async () =
       status: '1', info: 'OK', pois: [{
         id: 'B0001', name: '授权数据餐厅', address: '科技园 1 号', location: '113.9,22.5',
         type: '餐饮服务;中餐厅;中餐厅', atag: '粤菜',
-        business: { tag: '清淡,烧味', rating: '4.6', cost: '88', opentime_today: '00:00-23:59' }
+        business: { tag: '清淡,烧味', rating: '4.6', cost: '88', opentime_today: '00:00-23:59' },
+        photos: [
+          { title: '门店环境', url: 'https://example.com/store.jpg' },
+          { title: '菜单价目表', url: 'https://example.com/menu.jpg' }
+        ]
       }]
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   });
   const items = await provider.search('想吃粤菜', 5);
   assert.match(requestedUrl, /\/v5\/place\/text/);
   assert.match(requestedUrl, /types=050000/);
+  assert.equal(new URL(requestedUrl).searchParams.get('show_fields'), 'business,photos');
   assert.equal(items[0].id, 'amap:B0001');
   assert.equal(items[0].averagePrice, 88);
   assert.equal(items[0].menu.length, 0);
+  assert.equal(items[0].images.length, 2);
+  assert.equal(items[0].images[1].menuCandidate, true);
+  assert.equal(items[0].imageUrl, 'https://example.com/store.jpg');
   assert.equal(items[0].source, 'amap');
 });
 
@@ -93,12 +102,89 @@ test('unknown opening hours stay unknown', () => {
   assert.deepEqual(amapInternals.openingState(''), { known: false, open: false });
 });
 
-test('public gateway exposes only health and app conversation execution', () => {
+test('natural language dining intent extracts name, dish, distance and rating', () => {
+  const intent = parseDiningIntent('帮我找“福味家宴”，想吃盐水鸭，2公里内评分4.5以上的清淡菜');
+  assert.deepEqual(intent.restaurantNames, ['福味家宴']);
+  assert.deepEqual(intent.dishes, ['盐水鸭']);
+  assert.equal(intent.maxDistanceKm, 2);
+  assert.equal(intent.minRating, 4.5);
+  assert.deepEqual(intent.tastes, ['清淡']);
+});
+
+test('bare food terms match both dishes and store names', () => {
+  const intent = parseDiningIntent('炒饼');
+  assert.deepEqual(intent.dishes, ['炒饼']);
+  assert.deepEqual(intent.restaurantNames, ['炒饼']);
+});
+
+test('restaurant query searches menu item fields in SQLite', async () => {
+  const restaurants = await runtime.store.queryRestaurants({ query: '鲈鱼' });
+  assert.ok(restaurants.some((item) => item.id === 'rest-lanxi'));
+});
+
+test('restaurant ranking applies name, dish, distance and rating constraints', () => {
+  const intent = parseDiningIntent('找“福味家宴”，想吃盐水鸭，2公里内评分4.5以上');
+  const result = recommendRestaurants([
+    { id: 'target', name: '福味家宴', cuisines: ['南京菜'], tags: ['盐水鸭'], menu: [],
+      averagePrice: 80, rating: 4.8, isOpen: true, openStatusKnown: true, distanceMeters: 1200 },
+    { id: 'far', name: '福味家宴远店', cuisines: ['南京菜'], tags: ['盐水鸭'], menu: [],
+      averagePrice: 80, rating: 4.9, isOpen: true, openStatusKnown: true, distanceMeters: 3500 }
+  ], intent, null, 5);
+  assert.deepEqual(result.map((item) => item.id), ['target']);
+});
+
+test('restaurant detail recognizes only AMap photos explicitly labeled as menus', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'restaurant-agent-photo-menu-'));
+  try {
+    const restaurant = {
+      id: 'amap:photo-menu', externalPoiId: 'photo-menu', source: 'amap', name: '图片菜单餐厅',
+      address: '南京市测试路', location: { longitude: 118.79, latitude: 32.04 }, distanceMeters: 0,
+      cuisines: ['南京菜'], tags: [], averagePrice: 60, rating: 4.5, isOpen: true,
+      openStatusKnown: true, openingHours: '09:00-22:00', telephone: '', imageUrl: 'https://example.com/store.jpg',
+      images: [
+        { title: '门店环境', url: 'https://example.com/store.jpg', menuCandidate: false },
+        { title: '菜单价目表', url: 'https://example.com/menu.jpg', menuCandidate: true }
+      ], reviewSummary: '', menu: [], dataUpdatedAt: new Date().toISOString()
+    };
+    const store = await new SqliteStore(join(directory, 'restaurants.sqlite'), {
+      initialRestaurants: [restaurant]
+    }).init();
+    const fetchedUrls = [];
+    const orchestrator = new RestaurantOrchestrator(store, {
+      vision: {}, places: { isConfigured: () => false },
+      imageFetch: async (url) => {
+        fetchedUrls.push(url);
+        return new Response(Buffer.from('image-bytes'), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      },
+      chat: {
+        recognizeMenu: async () => ({
+          usedModel: true, items: [{ id: 'photo-dish', name: '金陵盐水鸭', category: '凉菜', price: 58,
+            ingredients: [], tags: [], confidence: 0.91 }]
+        })
+      }
+    });
+    const result = await orchestrator.restaurantDetail('amap:photo-menu', { sessionId: 'preview' },
+      { userId: 'guest', personalizationEnabled: false });
+    assert.deepEqual(fetchedUrls, ['https://example.com/menu.jpg']);
+    assert.equal(result.selectedRestaurant.menu[0].name, '金陵盐水鸭');
+    assert.equal(store.snapshot().restaurants[0].menuSource, 'amap-photo-vision');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('public gateway exposes app, Huawei login and authenticated profile routes', () => {
   assert.equal(isAllowedPublicRoute('GET', '/healthz'), true);
   assert.equal(isAllowedPublicRoute('POST', '/v1/agent/execute'), true);
+  assert.equal(isAllowedPublicRoute('POST', '/v1/auth/register'), true);
+  assert.equal(isAllowedPublicRoute('POST', '/v1/auth/login'), true);
+  assert.equal(isAllowedPublicRoute('POST', '/v1/auth/huawei'), true);
+  assert.equal(isAllowedPublicRoute('GET', '/v1/users/me/profile'), true);
+  assert.equal(isAllowedPublicRoute('PUT', '/v1/users/me/profile'), true);
+  assert.equal(isAllowedPublicRoute('POST', '/v1/restaurants/amap%3AB001/reviews'), true);
   assert.equal(isAllowedPublicRoute('GET', '/internal/diagnostics'), false);
   assert.equal(isAllowedPublicRoute('POST', '/v1/auth/otp/request'), false);
-  assert.equal(isAllowedPublicRoute('PUT', '/v1/users/me/profile'), false);
+  assert.equal(isAllowedPublicRoute('DELETE', '/v1/users/me'), false);
   assert.equal(isAllowedPublicRoute('GET', '/v1/restaurants'), false);
 });
 
@@ -232,6 +318,59 @@ test('full dining state machine binds review to the selected restaurant', async 
   assert.ok(persistedSession.messages.every((item) => !item.text.includes('13800138000')));
 });
 
+test('reviews retain separate entries across users and visits', async () => {
+  const created = await request('/v1/sessions', {
+    method: 'POST', body: JSON.stringify({ deviceId: 'repeat-review-device', userId: 'flow-device' })
+  });
+  const sessionId = created.body.id;
+  await runtime.store.transaction((state) => {
+    state.users.push({
+      id: 'flow-device', nickname: '回访用户', phone: '', hometown: '', dietaryRestrictions: [],
+      tastePreferences: [], cuisinePreferences: [], personalizationEnabled: true
+    });
+    state.users.push({
+      id: 'other-review-user', nickname: '另一位用户', phone: '', hometown: '', dietaryRestrictions: [],
+      tastePreferences: [], cuisinePreferences: [], personalizationEnabled: true
+    });
+    const session = state.sessions.find((item) => item.id === sessionId);
+    session.userId = 'flow-device';
+    session.selectedRestaurantId = 'rest-suyuan';
+    session.stage = 'REVIEW';
+    return true;
+  });
+
+  const reviewed = await request(`/v1/sessions/${sessionId}/messages`, {
+    method: 'POST', body: JSON.stringify({ text: '第二次到店，蔬菜依然新鲜', userId: 'flow-device' })
+  });
+  assert.equal(reviewed.response.status, 200);
+  const reviews = runtime.store.snapshot().reviews.filter((item) =>
+    item.userId === 'flow-device' && item.restaurantId === 'rest-suyuan');
+  assert.ok(reviews.length >= 2);
+  assert.equal(new Set(reviews.map((item) => item.id)).size, reviews.length);
+  assert.ok(reviews.some((item) => item.text.includes('第二次到店')));
+
+  const other = await request('/v1/sessions', {
+    method: 'POST', body: JSON.stringify({ deviceId: 'other-review-device', userId: 'other-review-user' })
+  });
+  await runtime.store.transaction((state) => {
+    const session = state.sessions.find((item) => item.id === other.body.id);
+    session.userId = 'other-review-user';
+    session.selectedRestaurantId = 'rest-suyuan';
+    session.stage = 'REVIEW';
+    return true;
+  });
+  const otherReviewed = await request(`/v1/sessions/${other.body.id}/messages`, {
+    method: 'POST', body: JSON.stringify({ text: '第一次来，环境安静', userId: 'other-review-user' })
+  });
+  assert.equal(otherReviewed.response.status, 200);
+
+  const restaurant = await request('/v1/restaurants/rest-suyuan');
+  const publicReviews = restaurant.body.reviews;
+  assert.ok(publicReviews.some((item) => item.authorName === '回访用户'));
+  assert.ok(publicReviews.some((item) => item.authorName === '另一位用户'));
+  assert.ok(publicReviews.every((item) => item.createdAt.length >= 16));
+});
+
 test('discover pagination returns unique restaurants and public reviews', async () => {
   const first = await request('/v1/agent/execute', {
     method: 'POST',
@@ -299,6 +438,7 @@ test('HarmonyOS demo endpoint preserves the end-to-end app contract', async () =
   assert.equal(recognized.state.stage, 'MENU_READY');
   assert.equal(recognized.recognizedMenu[0].name, '盐水鸭');
   assert.ok(recognized.dishRecommendations.length > 0);
+  assert.equal(recognized.dishRecommendations[0].reason, '');
   assert.equal(recognized.state.menuStatus, 'PENDING');
   const pendingVersion = runtime.store.snapshot().menuVersions.find((item) => item.id === recognized.state.menuVersionId);
   assert.equal(pendingVersion.status, 'PENDING');
@@ -327,7 +467,7 @@ test('HarmonyOS demo endpoint preserves the end-to-end app contract', async () =
   assert.deepEqual(reviewed.dishRecommendations, []);
 });
 
-test('model participates in every fixed dining node while state remains server-controlled', async () => {
+test('model handles discovery and free-form chat without rewriting fixed workflow actions', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'restaurant-agent-model-flow-'));
   try {
     const store = await new SqliteStore(join(directory, 'restaurants.sqlite'), {
@@ -361,14 +501,13 @@ test('model participates in every fixed dining node while state remains server-c
       userId: 'guest', dietaryRestrictions: [], tastePreferences: ['清淡'],
       cuisinePreferences: ['江浙菜'], personalizationEnabled: true
     };
-    const execute = async (action, extra = {}, generatedReply = true) => {
+    const execute = async (action, extra = {}, expectedModel = false) => {
       const response = await orchestrator.executeAppRequest({
         action, message: '', restaurantId: '', menuImages: [], recognizedMenu: [],
         state, profile, ...extra
       });
       state = response.state;
-      assert.equal(response.modelUsed, true);
-      if (generatedReply) assert.match(response.reply, /^模型回复/);
+      assert.equal(response.modelUsed, expectedModel);
       return response;
     };
 
@@ -376,7 +515,7 @@ test('model participates in every fixed dining node while state remains server-c
       action: 'discover', state, profile, message: '', restaurantId: '', menuImages: [], recognizedMenu: []
     });
     assert.equal(discovered.modelUsed, false);
-    await execute('chat', { message: '推荐清淡的江浙菜' }, false);
+    await execute('chat', { message: '推荐清淡的江浙菜' }, true);
     await execute('select_restaurant', { restaurantId: 'rest-suyuan' });
     await execute('arrive');
     await execute('upload_menu', { recognizedMenu: [
@@ -384,16 +523,18 @@ test('model participates in every fixed dining node while state remains server-c
         ingredients: ['青菜'], tags: ['清淡'], confidence: 0.95 }
     ] });
     await execute('confirm_menu');
+    const diningReply = await execute('chat', { message: '这道菜有什么特点' }, true);
+    assert.match(diningReply.reply, /^模型回复/);
     await execute('finish_meal');
     await execute('chat', { message: '味道清淡，服务很好' });
 
     assert.ok(intentCalls > 0);
     assert.ok(rankCalls > 0);
     assert.ok(modelNodes.some((node) => node.startsWith('chat:')));
-    assert.ok(modelNodes.some((node) => node.startsWith('select_restaurant:')));
-    assert.ok(modelNodes.some((node) => node.startsWith('arrive:')));
-    assert.ok(modelNodes.some((node) => node.startsWith('upload_menu:')));
-    assert.ok(modelNodes.some((node) => node.startsWith('finish_meal:')));
+    assert.equal(modelNodes.some((node) => node.startsWith('select_restaurant:')), false);
+    assert.equal(modelNodes.some((node) => node.startsWith('arrive:')), false);
+    assert.equal(modelNodes.some((node) => node.startsWith('upload_menu:')), false);
+    assert.equal(modelNodes.some((node) => node.startsWith('finish_meal:')), false);
     assert.equal(state.stage, 'END');
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -450,6 +591,51 @@ test('restaurant queries after selection use model keywords and AMap candidates'
   }
 });
 
+test('ordinary account registration and login issue the shared profile token', async () => {
+  const registered = await request('/v1/auth/register', {
+    method: 'POST', body: JSON.stringify({ nickname: '普通用户', account: 'DemoUser', password: 'secure123' })
+  });
+  assert.equal(registered.response.status, 201);
+  assert.equal(registered.body.user.nickname, '普通用户');
+  assert.ok(registered.body.token.includes('.'));
+  assert.equal(registered.body.user.passwordHash, undefined);
+  const stored = runtime.store.snapshot().users.find((item) => item.id === registered.body.user.id);
+  assert.match(stored.passwordHash, /^scrypt\$/);
+  assert.ok(!stored.passwordHash.includes('secure123'));
+
+  const duplicate = await request('/v1/auth/register', {
+    method: 'POST', body: JSON.stringify({ nickname: '重复用户', account: 'demouser', password: 'secure123' })
+  });
+  assert.equal(duplicate.response.status, 409);
+
+  const rejected = await request('/v1/auth/login', {
+    method: 'POST', body: JSON.stringify({ account: 'DemoUser', password: 'wrong-password' })
+  });
+  assert.equal(rejected.response.status, 401);
+
+  const loggedIn = await request('/v1/auth/login', {
+    method: 'POST', body: JSON.stringify({ account: 'demouser', password: 'secure123' })
+  });
+  assert.equal(loggedIn.response.status, 200);
+  assert.equal(loggedIn.body.user.id, registered.body.user.id);
+
+  const profile = await request('/v1/users/me/profile', {
+    headers: { authorization: `Bearer ${loggedIn.body.token}` }
+  });
+  assert.equal(profile.response.status, 200);
+  assert.equal(profile.body.nickname, '普通用户');
+
+  const review = await request('/v1/restaurants/rest-suyuan/reviews', {
+    method: 'POST', headers: { authorization: `Bearer ${loggedIn.body.token}` },
+    body: JSON.stringify({ text: '详情页直接评论，环境安静。', rating: 4 })
+  });
+  assert.equal(review.response.status, 201);
+  assert.equal(review.body.authorName, '普通用户');
+  assert.equal(review.body.rating, 4);
+  const restaurant = await request('/v1/restaurants/rest-suyuan');
+  assert.ok(restaurant.body.reviews.some((item) => item.id === review.body.id));
+});
+
 test('OTP login and profile update require a valid token', async () => {
   const otp = await request('/v1/auth/otp/request', {
     method: 'POST', body: JSON.stringify({ phone: '13800138000' })
@@ -468,12 +654,14 @@ test('OTP login and profile update require a valid token', async () => {
     method: 'PUT',
     headers: { authorization: `Bearer ${verified.body.token}` },
     body: JSON.stringify({
-      nickname: '餐厅用户', hometown: '杭州', dietaryRestrictions: ['虾'],
+      nickname: '餐厅用户', hometown: '杭州', avatarUrl: 'data:image/jpeg;base64,/9j/2Q==', dietaryRestrictions: ['虾'],
       tastePreferences: ['清淡'], cuisinePreferences: ['江浙菜'], personalizationEnabled: true
     })
   });
   assert.equal(profile.response.status, 200);
   assert.equal(profile.body.nickname, '餐厅用户');
+  assert.equal(profile.body.hometown, '杭州');
+  assert.equal(profile.body.avatarUrl, 'data:image/jpeg;base64,/9j/2Q==');
   assert.deepEqual(profile.body.dietaryRestrictions, ['虾']);
 
   const unauthorized = await request('/v1/users/me/profile', {

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 
 function encode(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -27,6 +27,28 @@ export function verifyToken(token, secret, now = Date.now()) {
 
 export function randomSecret() {
   return randomBytes(32).toString('hex');
+}
+
+export function createOtp() {
+  return String(randomInt(100000, 1000000));
+}
+
+export function hashOtp(requestId, phone, code, secret) {
+  return createHmac('sha256', secret).update(`${requestId}:${phone}:${code}`).digest('hex');
+}
+
+export function hashPassword(password) {
+  const salt = randomBytes(16).toString('base64url');
+  const digest = scryptSync(String(password), salt, 64).toString('base64url');
+  return `scrypt$${salt}$${digest}`;
+}
+
+export function verifyPassword(password, encoded) {
+  const [algorithm, salt, digest] = String(encoded ?? '').split('$');
+  if (algorithm !== 'scrypt' || !salt || !digest) return false;
+  const expected = Buffer.from(digest, 'base64url');
+  const actual = scryptSync(String(password), salt, expected.length);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 export function sanitizeReview(text) {

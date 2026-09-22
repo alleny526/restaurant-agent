@@ -1,5 +1,5 @@
 import { http } from '@kit.NetworkKit';
-import { AuthResponse, AuthUser, UserProfile } from '../model/Models';
+import { AuthResponse, AuthUser, RestaurantReview, UserProfile } from '../model/Models';
 import { AppConfig } from './AppConfig';
 
 interface ErrorPayload {
@@ -57,6 +57,16 @@ export class AuthApi {
       JSON.stringify({ authorizationCode }));
   }
 
+  static login(account: string, password: string): Promise<AuthResponse> {
+    return AuthApi.request<AuthResponse>('/v1/auth/login', http.RequestMethod.POST,
+      JSON.stringify({ account, password }));
+  }
+
+  static register(nickname: string, account: string, password: string): Promise<AuthResponse> {
+    return AuthApi.request<AuthResponse>('/v1/auth/register', http.RequestMethod.POST,
+      JSON.stringify({ nickname, account, password }));
+  }
+
   static getProfile(token: string): Promise<AuthUser> {
     return AuthApi.request<AuthUser>('/v1/users/me/profile', http.RequestMethod.GET, '', token);
   }
@@ -65,10 +75,17 @@ export class AuthApi {
     return AuthApi.request<AuthUser>('/v1/users/me/profile', http.RequestMethod.PUT, JSON.stringify({
       nickname: profile.nickname,
       hometown: profile.hometown,
+      avatarUrl: profile.avatarUrl,
       dietaryRestrictions: profile.dietaryRestrictions,
       tastePreferences: profile.tastePreferences,
       cuisinePreferences: profile.cuisinePreferences,
       personalizationEnabled: profile.personalizationEnabled
     }), token);
+  }
+
+  static submitRestaurantReview(token: string, restaurantId: string, text: string,
+    rating: number): Promise<RestaurantReview> {
+    return AuthApi.request<RestaurantReview>(`/v1/restaurants/${encodeURIComponent(restaurantId)}/reviews`,
+      http.RequestMethod.POST, JSON.stringify({ text, rating }), token);
   }
 }

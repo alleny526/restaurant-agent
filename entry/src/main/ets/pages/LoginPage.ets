@@ -1,6 +1,6 @@
 import { LoginWithHuaweiIDButton, loginComponentManager } from '@kit.AccountKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { AuthUser } from '../model/Models';
+import { AuthResponse, AuthUser } from '../model/Models';
 import { AuthApi } from '../services/AuthApi';
 
 const COLOR_PRIMARY: string = '#E95E35';
@@ -66,17 +66,18 @@ export struct LoginPage {
   private huaweiErrorMessage(code: number): string {
     if (code === 1005300001) return '请先阅读并同意登录协议';
     if (code === 1001502001) return '请先在设备设置中登录华为账号';
+    if (code === 1001502003) return '华为账号 Client ID 或签名 Profile 无效，请重新同步 AGC 签名配置';
     if (code === 1001502005) return '网络连接异常，请检查网络后重试';
     if (code === 1001500001) return '应用签名或华为账号 Client ID 配置不正确';
     if (code === 1001500003) return '当前账号或设备暂不支持华为账号登录';
-    return '华为账号登录暂不可用，请稍后重试';
+    return `华为账号登录暂不可用（错误码 ${code}）`;
   }
 
   private updateAgreement(value: boolean): void {
     this.agreementAccepted = value;
     this.huaweiButtonController.setAgreementStatus(value ? loginComponentManager.AgreementStatus.ACCEPTED :
       loginComponentManager.AgreementStatus.NOT_ACCEPTED);
-    if (value && this.notice === '请先阅读并同意登录协议') this.notice = '';
+    if (value && this.notice.includes('请先阅读并同意')) this.notice = '';
   }
 
   private switchAccountMode(mode: string): void {
@@ -86,13 +87,20 @@ export struct LoginPage {
     this.confirmPassword = '';
   }
 
-  private submitAccountForm(): void {
-    if (this.accountMode === 'register' && this.nickname.trim().length === 0) {
+  private completeLogin(result: AuthResponse): void {
+    this.authToken = result.token;
+    this.onLoginSuccess(result.user);
+  }
+
+  private async submitAccountForm(): Promise<void> {
+    const account: string = this.account.trim();
+    const nickname: string = this.nickname.trim();
+    if (this.accountMode === 'register' && nickname.length === 0) {
       this.notice = '请输入昵称';
       return;
     }
-    if (this.account.trim().length === 0) {
-      this.notice = '请输入手机号或用户名';
+    if (account.length < 3 || account.includes(' ')) {
+      this.notice = '请输入至少 3 位且不含空格的手机号或用户名';
       return;
     }
     if (this.password.length < 6) {
@@ -107,7 +115,18 @@ export struct LoginPage {
       this.notice = '请先阅读并同意用户协议与隐私政策';
       return;
     }
-    this.notice = this.accountMode === 'login' ? '普通账号登录服务暂未接入' : '普通账号注册服务暂未接入';
+    this.isLoading = true;
+    this.notice = '';
+    try {
+      const result: AuthResponse = this.accountMode === 'register'
+        ? await AuthApi.register(nickname, account, this.password)
+        : await AuthApi.login(account, this.password);
+      this.completeLogin(result);
+    } catch (error) {
+      this.notice = (error as Error).message;
+    } finally {
+      this.isLoading = false;
+    }
   }
 
   private async loginWithHuaweiCode(authorizationCode: string): Promise<void> {
@@ -119,9 +138,7 @@ export struct LoginPage {
     this.isLoading = true;
     this.notice = '';
     try {
-      const result = await AuthApi.loginWithHuawei(authorizationCode);
-      this.authToken = result.token;
-      this.onLoginSuccess(result.user);
+      this.completeLogin(await AuthApi.loginWithHuawei(authorizationCode));
     } catch (error) {
       this.notice = (error as Error).message;
     } finally {
@@ -151,30 +168,16 @@ export struct LoginPage {
   @Builder
   private ModeButton(label: string, mode: string) {
     Button(label)
-      .type(ButtonType.Normal)
-      .layoutWeight(1)
-      .height(42)
-      .fontSize(14)
+      .type(ButtonType.Normal).layoutWeight(1).height(40).fontSize(14)
       .fontWeight(this.accountMode === mode ? FontWeight.Bold : FontWeight.Medium)
-      .fontColor(this.accountMode === mode ? COLOR_TEXT : COLOR_MUTED)
+      .fontColor(this.accountMode === mode ? COLOR_PRIMARY_DARK : COLOR_MUTED)
       .backgroundColor(this.accountMode === mode ? Color.White : Color.Transparent)
-      .borderRadius(13)
-      .shadow(this.accountMode === mode ? {
-        radius: 8,
-        color: '#12000000',
-        offsetX: 0,
-        offsetY: 2
-      } : { radius: 0, color: Color.Transparent, offsetX: 0, offsetY: 0 })
-      .onClick(() => this.switchAccountMode(mode))
+      .borderRadius(13).onClick(() => this.switchAccountMode(mode))
   }
 
   @Builder
   private FieldLabel(label: string) {
-    Text(label)
-      .fontSize(12)
-      .fontWeight(FontWeight.Medium)
-      .fontColor(COLOR_TEXT)
-      .width('100%')
+    Text(label).fontSize(12).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT).width('100%')
   }
 
   build() {
@@ -190,111 +193,85 @@ export struct LoginPage {
       .width('100%').padding({ left: 12, right: 12, top: 10, bottom: 4 })
 
       Scroll() {
-        Column({ space: 20 }) {
-          Column({ space: 10 }) {
-            Image($r('app.media.app_icon')).width(68).height(68).borderRadius(19)
+        Column({ space: 18 }) {
+          Column({ space: 8 }) {
+            Image($r('app.media.app_icon')).width(64).height(64).borderRadius(18)
             Text(this.accountMode === 'login' ? '欢迎回来' : '创建你的账号')
-              .fontSize(27).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-            Text(this.accountMode === 'login' ? '登录后继续发现合你口味的餐厅' : '注册后即可保存偏好并同步用餐记录')
-              .fontSize(13).fontColor(COLOR_MUTED).textAlign(TextAlign.Center)
+              .fontSize(26).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
+            Text('登录后可同步个人偏好、用餐记录与评论身份')
+              .fontSize(12).fontColor(COLOR_MUTED).textAlign(TextAlign.Center)
           }
           .width('100%')
 
-          Column({ space: 17 }) {
+          Column({ space: 15 }) {
             Row({ space: 4 }) {
               this.ModeButton('登录', 'login')
               this.ModeButton('注册', 'register')
             }
-            .padding(4).height(50).backgroundColor('#F4ECE7').borderRadius(16).width('100%')
+            .padding(4).height(48).backgroundColor('#F4ECE7').borderRadius(16).width('100%')
 
             if (this.accountMode === 'register') {
-              Column({ space: 7 }) {
+              Column({ space: 6 }) {
                 this.FieldLabel('昵称')
-                TextInput({ text: this.nickname, placeholder: '请输入昵称' })
-                  .height(48).fontSize(14).fontColor(COLOR_TEXT).placeholderColor('#B4A7A0')
-                  .backgroundColor('#FFFDFC').borderRadius(14)
+                TextInput({ text: this.nickname, placeholder: '用于个人资料与评论展示' })
+                  .height(46).backgroundColor('#FFFDFC').borderRadius(13)
                   .border({ width: 1, color: COLOR_LINE })
                   .onChange((value: string) => this.nickname = value)
-              }
-              .alignItems(HorizontalAlign.Start).width('100%')
+              }.width('100%')
             }
 
-            Column({ space: 7 }) {
+            Column({ space: 6 }) {
               this.FieldLabel('手机号或用户名')
-              TextInput({ text: this.account, placeholder: '请输入手机号或用户名' })
-                .height(48).fontSize(14).fontColor(COLOR_TEXT).placeholderColor('#B4A7A0')
-                .backgroundColor('#FFFDFC').borderRadius(14)
+              TextInput({ text: this.account, placeholder: '请输入至少 3 位账号' })
+                .height(46).backgroundColor('#FFFDFC').borderRadius(13)
                 .border({ width: 1, color: COLOR_LINE })
                 .onChange((value: string) => this.account = value)
-            }
-            .alignItems(HorizontalAlign.Start).width('100%')
+            }.width('100%')
 
-            Column({ space: 7 }) {
+            Column({ space: 6 }) {
               this.FieldLabel('密码')
-              TextInput({ text: this.password, placeholder: this.accountMode === 'login' ? '请输入密码' : '请设置至少 6 位密码' })
-                .type(InputType.Password).height(48).fontSize(14).fontColor(COLOR_TEXT)
-                .placeholderColor('#B4A7A0').backgroundColor('#FFFDFC').borderRadius(14)
+              TextInput({ text: this.password, placeholder: '至少 6 位' })
+                .type(InputType.Password).height(46).backgroundColor('#FFFDFC').borderRadius(13)
                 .border({ width: 1, color: COLOR_LINE })
                 .onChange((value: string) => this.password = value)
-            }
-            .alignItems(HorizontalAlign.Start).width('100%')
+            }.width('100%')
 
             if (this.accountMode === 'register') {
-              Column({ space: 7 }) {
+              Column({ space: 6 }) {
                 this.FieldLabel('确认密码')
                 TextInput({ text: this.confirmPassword, placeholder: '请再次输入密码' })
-                  .type(InputType.Password).height(48).fontSize(14).fontColor(COLOR_TEXT)
-                  .placeholderColor('#B4A7A0').backgroundColor('#FFFDFC').borderRadius(14)
+                  .type(InputType.Password).height(46).backgroundColor('#FFFDFC').borderRadius(13)
                   .border({ width: 1, color: COLOR_LINE })
                   .onChange((value: string) => this.confirmPassword = value)
-              }
-              .alignItems(HorizontalAlign.Start).width('100%')
-            } else {
-              Text('忘记密码？')
-                .fontSize(12).fontColor(COLOR_PRIMARY_DARK).width('100%').textAlign(TextAlign.End)
+              }.width('100%')
             }
 
-            Button(this.accountMode === 'login' ? '登录' : '注册')
+            Button(this.isLoading ? '处理中…' : (this.accountMode === 'login' ? '登录' : '注册并登录'))
               .type(ButtonType.Normal).height(48).width('100%').fontSize(15).fontWeight(FontWeight.Bold)
               .fontColor(Color.White).backgroundColor(COLOR_PRIMARY).borderRadius(15)
-              .onClick(() => this.submitAccountForm())
+              .enabled(!this.isLoading).onClick(() => this.submitAccountForm())
 
             Row({ space: 12 }) {
               Divider().color(COLOR_LINE).layoutWeight(1)
-              Text('其他登录方式').fontSize(11).fontColor('#A99A92')
+              Text('或').fontSize(11).fontColor('#A99A92')
               Divider().color(COLOR_LINE).layoutWeight(1)
-            }
-            .width('100%')
+            }.width('100%')
 
             LoginWithHuaweiIDButton({
               params: this.huaweiButtonParams,
               controller: this.huaweiButtonController
-            })
-              .height(48).width('100%')
-
-            Text('使用华为账号安全登录')
-              .fontSize(11).fontColor(COLOR_MUTED).width('100%').textAlign(TextAlign.Center)
-
-            if (this.isLoading) {
-              Row({ space: 8 }) {
-                LoadingProgress().width(18).height(18).color(COLOR_HUAWEI)
-                Text('正在登录…').fontSize(12).fontColor(COLOR_MUTED)
-              }
-            }
+            }).height(48).width('100%')
 
             if (this.notice.length > 0) {
-              Text(this.notice)
-                .fontSize(12).fontColor(COLOR_PRIMARY_DARK).lineHeight(18).textAlign(TextAlign.Center)
-                .padding(10).backgroundColor('#FFF0E8').borderRadius(10).width('100%')
+              Text(this.notice).fontSize(12).fontColor(COLOR_PRIMARY_DARK).lineHeight(18)
+                .textAlign(TextAlign.Center).padding(10).backgroundColor('#FFF0E8').borderRadius(10).width('100%')
             }
 
             this.AgreementRow()
           }
-          .padding(18).backgroundColor(Color.White).borderRadius(22).width('100%')
-          .shadow({ radius: 18, color: '#0D5B3828', offsetX: 0, offsetY: 6 })
+          .padding(18).backgroundColor(Color.White).borderRadius(20).width('100%')
         }
-        .padding({ left: 20, right: 20, top: 14, bottom: 24 })
-        .constraintSize({ maxWidth: 440 }).width('100%')
+        .padding({ left: 20, right: 20, top: 12, bottom: 24 }).constraintSize({ maxWidth: 440 }).width('100%')
       }
       .scrollBar(BarState.Off).layoutWeight(1).width('100%')
     }

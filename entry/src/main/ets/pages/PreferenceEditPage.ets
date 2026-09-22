@@ -1,6 +1,7 @@
 import { LengthMetrics } from '@kit.ArkUI';
 import { AuthUser, UserProfile } from '../model/Models';
 import { AuthApi } from '../services/AuthApi';
+import { AvatarImagePicker } from '../services/AvatarImagePicker';
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -69,7 +70,11 @@ export struct PreferenceEditPage {
   @State restrictionOptions: PreferenceOptionState[] = [];
   @State tasteOptions: PreferenceOptionState[] = [];
   @State cuisineOptions: PreferenceOptionState[] = [];
+  @State editNickname: string = '';
+  @State editHometown: string = '';
+  @State editAvatarUrl: string = '';
   @State personalizationEnabled: boolean = true;
+  @State isPickingAvatar: boolean = false;
   @State isSaving: boolean = false;
   @State notice: string = '';
 
@@ -81,6 +86,9 @@ export struct PreferenceEditPage {
     this.cuisineOptions = this.createOptions(
       ['江浙菜', '杭帮菜', '粤菜', '川菜', '湘菜', '鲁菜', '西北菜', '素食', '日料', '西餐'],
       this.profile.cuisinePreferences);
+    this.editNickname = this.profile.nickname;
+    this.editHometown = this.profile.hometown;
+    this.editAvatarUrl = this.profile.avatarUrl;
     this.personalizationEnabled = this.profile.personalizationEnabled;
   }
 
@@ -101,6 +109,7 @@ export struct PreferenceEditPage {
       nickname: user.nickname,
       phone: user.phone,
       hometown: user.hometown,
+      avatarUrl: user.avatarUrl ?? '',
       dietaryRestrictions: user.dietaryRestrictions,
       tastePreferences: user.tastePreferences,
       cuisinePreferences: user.cuisinePreferences,
@@ -108,12 +117,32 @@ export struct PreferenceEditPage {
     } as UserProfile;
   }
 
+  private async pickAvatar(): Promise<void> {
+    if (this.isPickingAvatar) return;
+    this.isPickingAvatar = true;
+    this.notice = '';
+    try {
+      const selected: string | null = await AvatarImagePicker.pick();
+      if (selected !== null) this.editAvatarUrl = selected;
+    } catch (error) {
+      this.notice = (error as Error).message;
+    } finally {
+      this.isPickingAvatar = false;
+    }
+  }
+
   private async save(): Promise<void> {
+    const nickname: string = this.editNickname.trim();
+    if (nickname.length === 0) {
+      this.notice = '昵称不能为空';
+      return;
+    }
     const updated: UserProfile = {
       userId: this.profile.userId,
-      nickname: this.profile.nickname,
+      nickname,
       phone: this.profile.phone,
-      hometown: this.profile.hometown,
+      hometown: this.editHometown.trim(),
+      avatarUrl: this.editAvatarUrl,
       dietaryRestrictions: this.selectedValues(this.restrictionOptions),
       tastePreferences: this.selectedValues(this.tasteOptions),
       cuisinePreferences: this.selectedValues(this.cuisineOptions),
@@ -143,8 +172,8 @@ export struct PreferenceEditPage {
         Button('‹').type(ButtonType.Circle).width(40).height(40).fontSize(26)
           .fontColor(COLOR_TEXT).backgroundColor(Color.Transparent).onClick(() => this.onBack())
         Column({ space: 2 }) {
-          Text('饮食偏好').fontSize(21).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-          Text('选择结果会用于个性化推荐').fontSize(11).fontColor(COLOR_MUTED)
+          Text('编辑个人信息').fontSize(21).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
+          Text('资料与偏好统一保存').fontSize(11).fontColor(COLOR_MUTED)
         }
         .alignItems(HorizontalAlign.Start).layoutWeight(1)
       }
@@ -157,6 +186,43 @@ export struct PreferenceEditPage {
             Text(this.notice).fontSize(12).lineHeight(18).fontColor('#9A3D25')
               .padding(11).backgroundColor('#FFF0E8').borderRadius(12).width('100%')
           }
+
+          Column({ space: 14 }) {
+            Text('基本资料').fontSize(17).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+            Row({ space: 14 }) {
+              if (this.editAvatarUrl.length > 0) {
+                Image(this.editAvatarUrl)
+                  .width(72).height(72).objectFit(ImageFit.Cover).borderRadius(36).clip(true)
+              } else {
+                Column() {
+                  Text(this.editNickname.length > 0 ? this.editNickname.substring(0, 1) : '游')
+                    .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Color.White)
+                }
+                .width(72).height(72).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+                .backgroundColor(COLOR_PRIMARY).borderRadius(36)
+              }
+              Column({ space: 8 }) {
+                Button(this.isPickingAvatar ? '处理中…' : '选择头像')
+                  .type(ButtonType.Normal).height(38).fontSize(13).fontColor(COLOR_PRIMARY_DARK)
+                  .enabled(!this.isPickingAvatar && !this.isSaving)
+                  .backgroundColor('#FFF0E8').borderRadius(19).onClick(() => this.pickAvatar())
+                if (this.editAvatarUrl.length > 0) {
+                  Button('移除头像')
+                    .type(ButtonType.Normal).height(32).fontSize(11).fontColor(COLOR_MUTED)
+                    .backgroundColor(Color.Transparent).onClick(() => this.editAvatarUrl = '')
+                }
+              }
+              .alignItems(HorizontalAlign.Start)
+            }
+            .width('100%')
+            TextInput({ text: this.editNickname, placeholder: '昵称' })
+              .height(46).backgroundColor('#FFFDFC').borderRadius(13)
+              .onChange((value: string) => this.editNickname = value)
+            TextInput({ text: this.editHometown, placeholder: '籍贯（选填）' })
+              .height(46).backgroundColor('#FFFDFC').borderRadius(13)
+              .onChange((value: string) => this.editHometown = value)
+          }
+          .padding(17).backgroundColor(Color.White).borderRadius(20).width('100%')
 
           PreferenceSectionView({
             options: this.restrictionOptions,
@@ -191,8 +257,8 @@ export struct PreferenceEditPage {
       .layoutWeight(1).width('100%').scrollBar(BarState.Off)
 
       Column({ space: 8 }) {
-        Button(this.isSaving ? '保存中…' : '保存偏好')
-          .width('100%').height(48).enabled(!this.isSaving)
+        Button(this.isSaving ? '保存中…' : '保存个人信息')
+          .width('100%').height(48).enabled(!this.isSaving && !this.isPickingAvatar)
           .fontSize(16).fontWeight(FontWeight.Medium).fontColor(Color.White)
           .backgroundColor(COLOR_PRIMARY).borderRadius(16).onClick(() => this.save())
         Text(this.authToken.length > 0 ? '保存后将同步到你的账号' : '游客模式下仅保存在本次运行中')

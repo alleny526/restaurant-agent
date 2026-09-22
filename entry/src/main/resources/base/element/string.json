@@ -1,8 +1,8 @@
 {
   "string": [
-    { "name": "module_desc", "value": "餐厅智能推荐与点菜" },
-    { "name": "EntryAbility_desc", "value": "餐厅助手主窗口" },
-    { "name": "EntryAbility_label", "value": "餐厅助手" },
+    { "name": "module_desc", "value": "吃了么智能推荐与点菜" },
+    { "name": "EntryAbility_desc", "value": "吃了么主窗口" },
+    { "name": "EntryAbility_label", "value": "吃了么" },
     { "name": "internet_reason", "value": "用于连接云端服务并获取餐厅数据" },
     { "name": "location_reason", "value": "用于检索附近餐厅并计算真实距离" }
   ]

@@ -23,4 +23,12 @@ signing-config.json5
 server/data/*.json
 server/data/*.sqlite
 server/data/*.sqlite-*
+server/data/*.log
 artifacts/
+
+# Local DevEco signing overrides and generated diagnostics
+build-profile.local.json5
+*.local.json5
+*.log
+faultlog/
+**/faultlog/

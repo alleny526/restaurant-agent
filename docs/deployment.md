@@ -1,72 +1,116 @@
-# 真机与 OpenAI-compatible 部署说明
+# 真机与端云部署说明
 
-## 1. 环境
+## 前置条件
 
-- DevEco Studio 6.0+，HarmonyOS SDK API 20 或更高版本。
-- HarmonyOS 真机或模拟器；菜单 OCR 建议用支持 Core Vision Kit 的真机验证。
-- Node.js 18+、Cloudflare Tunnel 可执行文件。
-- OpenAI-compatible Router API Key；Key 只配置在服务端。
+- DevEco Studio 6.0+，HarmonyOS SDK API 20+。
+- HarmonyOS 手机真机或模拟器；菜单 OCR 推荐真机。
+- Node.js 18+、Cloudflare `cloudflared`。
+- 高德 Web 服务 Key。
+- 一个 OpenAI-compatible 模型网关和服务端 API Key。
 
-本项目不需要 Cloud Foundation、Cloud DB 或系统 Agent HSP。
+本项目不需要 Cloud Foundation、Cloud DB、云函数或系统 Agent HSP。
 
-## 2. 服务端配置
+## 服务端配置
 
-在 `server/.env` 中配置：
+```powershell
+cd D:\RestaurantAgent\server
+Copy-Item .env.example .env
+npm install
+```
+
+建议配置：
 
 ```dotenv
 AMAP_WEB_KEY=你的高德Web服务Key
 AMAP_DEFAULT_REGION=南京市
-LLM_BASE_URL=https://rehdasu.cn/v1
 LLM_PROVIDER=openai-compatible
-LLM_API_KEY=你的Router_API_Key
+LLM_BASE_URL=https://你的兼容网关/v1
+LLM_API_KEY=服务端专用Key
 LLM_MODEL=gpt-5.6-sol
 LLM_FAST_MODEL=gpt-5.6-luna
 LLM_TIMEOUT_MS=20000
 ```
 
-复杂推荐和菜单视觉使用 `LLM_MODEL`；选店确认、到店提示和结束提示使用可选的 `LLM_FAST_MODEL`。不配置快速模型时所有节点回退到主模型。Qwen/DeepSeek 仍可通过兼容接口替换，但需要相应模型和请求参数支持。
+华为登录额外配置：
 
-启动业务服务与受限网关：
+```dotenv
+HUAWEI_CLIENT_ID=OAuth2客户端ID
+HUAWEI_CLIENT_SECRET=OAuth2客户端Secret
+```
+
+图片视觉服务为可选项。未配置时，端侧 Core Vision Kit OCR 仍可完成演示：
+
+```dotenv
+VISION_DEMO_MODE=true
+VISION_API_URL=
+VISION_API_KEY=
+```
+
+## 启动本地服务
 
 ```powershell
 cd D:\RestaurantAgent\server
-npm install
 npm start
 ```
+
+另开终端：
 
 ```powershell
 cd D:\RestaurantAgent\server
 npm run public-gateway
 ```
 
-验证 `http://127.0.0.1:8787/healthz`。`amapConfigured` 和 `llmConfigured` 均为 `true` 时，两类外部服务均已加载。
+验证：
 
-仅本机诊断：`http://127.0.0.1:8787/internal/diagnostics`。该接口只返回餐厅/会话数量、模型名称和脱敏的耗时聚合，不经过公网网关。
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/healthz
+Invoke-RestMethod http://127.0.0.1:8788/healthz
+```
 
-## 3. 公网 HTTPS
+必须看到 `status=ok`。`amapConfigured`、`llmConfigured` 可用于判断外部配置是否加载。
+
+## 公网 HTTPS
 
 ```powershell
 & "$env:LOCALAPPDATA\Programs\cloudflared\cloudflared.exe" `
   tunnel --url http://127.0.0.1:8788 --no-autoupdate
 ```
 
-把输出的 `https://*.trycloudflare.com` 写入 `entry/src/main/ets/services/AppConfig.ets` 的 `API_BASE_URL`，重新构建安装。Quick Tunnel 地址每次可能变化；变化后必须同步更新 App。受限网关不会暴露登录、OTP、用户资料或直接数据库查询接口。
+把输出的 `https://*.trycloudflare.com` 写入 `entry/src/main/ets/services/AppConfig.ets`：
 
-## 4. 验证流程
+```ts
+static readonly USE_REMOTE_SERVER: boolean = true;
+static readonly FALLBACK_TO_LOCAL_DEMO: boolean = false;
+static readonly API_BASE_URL: string = 'https://你的隧道地址';
+```
 
-1. 输入“推荐南京人均 100 元以内、现在营业的清淡餐厅”。
-2. 确认回复与餐厅卡片都出现在应用对话页。
-3. 选择餐厅并点击“我已抵达”，检查模型根据已选餐厅给出下一步；允许定位时验证距离来自高德周边检索。
-4. 上传菜单照片，检查图片最长边压缩到约 1600px、端侧 OCR 与视觉识别并行执行。
-5. 检查菜单处于“待确认”，可继续上传；点击“确认菜单”后进入用餐状态，确认版本才写入餐厅默认菜单。
-6. 点击“就餐完毕”并提交评价，检查状态进入 `END` 且评价已脱敏保存。
-7. 重复发送同一个 `clientRequestId`，确认写操作只产生一次状态变更。
-6. 暂时填错 `LLM_API_KEY`，重复流程，确认应用仍使用本地规则完成流程且不会编造餐厅。
+Quick Tunnel 地址重启后可能变化，修改后需重新构建 App。网关只开放健康检查、Agent 执行、认证、资料和评论接口。
 
-## 5. 常见问题
+## DevEco Studio 构建
 
-- `llmConfigured: false`：缺少 `LLM_BASE_URL` 或 `LLM_MODEL`；同时检查服务进程是否在修改 `.env` 后重启。
-- 返回本地规则回复：检查 Router Key、账户余额、网络和服务端日志。模型失败会静默降级，不影响业务状态。
-- 真机提示云端未连接：确认 Node、8788 网关和 Cloudflare Tunnel 都在运行，并核对 `API_BASE_URL`。
-- `The root node is not yet available for build`：使用 DevEco Studio 自带 Hvigor，不要在工程根目录安装 `@ohos/hvigor`。
-- 无法安装 HAP：在 DevEco Studio 关联已注册应用并配置调试签名。
+1. 打开 `D:\RestaurantAgent`。
+2. 使用自动签名，或选择 AppGallery Connect 已注册应用对应的调试 Profile。
+3. 连接真机并开启 USB 调试。
+4. 运行 `entry` 模块，或使用根目录 Hvigor 构建 HAP。
+
+签名错误 `9568322` 通常表示 Profile、证书、包名或设备来源不一致；优先使用 DevEco 自动签名并确认包名 `com.alleny526.restaurantagent`。
+
+## 验收路径
+
+1. 输入“推荐南京清淡、人均100元以内、2公里内评分4.5以上的餐厅”。
+2. 确认返回高德/SQLite 商家卡片、图片和筛选结果。
+3. 选择餐厅，点击“我已抵达”。
+4. 上传一张或多张菜单，确认识别结果进入待确认状态。
+5. 点击“确认菜单”，检查个性化建议和忌口提示。
+6. 在 DINING 阶段输入“想换一家火锅店”，检查候选和“不用换了”。
+7. 点击“不用换了”，确认回到原节点；选择新店，确认旧餐厅对话清空。
+8. 点击“就餐完毕”并提交评论，确认评论保存并自动开启新对话。
+9. 进入“我的 → 编辑个人信息”，测试头像、昵称、籍贯和偏好同步。
+
+## 常见问题
+
+- `llmConfigured: false`：检查 `.env` 的 Base URL、Model 和服务进程重启。
+- 真机云端未连接：检查 8787、8788、Cloudflare 和 AppConfig 地址。
+- 高德无结果：检查 Key、南京区域、设备定位和关键词；无定位时使用城市文本检索。
+- 菜单视觉不可用：确认端侧 OCR 权限和设备能力，查看低置信度结果并手动确认。
+- 小艺 Agent 不存在或无法上架：个人开发者不能依赖私有云插件；本 App 主链路不依赖小艺私有插件。

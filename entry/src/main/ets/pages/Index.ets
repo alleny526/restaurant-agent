@@ -1,6 +1,6 @@
 import { Context } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { KeyboardAvoidMode, LengthMetrics } from '@kit.ArkUI';
+import { KeyboardAvoidMode } from '@kit.ArkUI';
 import {
   AgentRequest,
   AgentResponse,
@@ -10,6 +10,7 @@ import {
   MenuImage,
   MenuItem,
   Restaurant,
+  RestaurantPhoto,
   RestaurantReview,
   SessionState,
   UserProfile,
@@ -20,7 +21,10 @@ import { RestaurantAgentApi } from '../services/RestaurantAgentApi';
 import { AppConfig } from '../services/AppConfig';
 import { LocationService } from '../services/LocationService';
 import { PersistedConversation, SessionPersistence } from '../services/SessionPersistence';
-import { ProfilePage as UserProfilePage } from './ProfilePage';
+import { AuthApi } from '../services/AuthApi';
+import { ProfilePage } from './ProfilePage';
+
+PersistentStorage.persistProp('restaurantAgentAuthToken', '');
 
 const COLOR_PRIMARY: string = '#E95E35';
 const COLOR_PRIMARY_DARK: string = '#BF3E1E';
@@ -39,6 +43,7 @@ const EMPTY_RESTAURANT: Restaurant = {
 @Component
 struct Index {
   private chatScroller: Scroller = new Scroller();
+  private pageStack: NavPathStack = new NavPathStack();
   private userLocation: UserLocation | undefined = undefined;
 
   @State selectedTab: number = 1;
@@ -51,13 +56,15 @@ struct Index {
   @State isRestaurantLoading: boolean = true;
   @State isLoadingMoreRestaurants: boolean = false;
   @State isDiscoverSearching: boolean = false;
+  @State isDetailLoading: boolean = false;
   @State serverSearchActive: boolean = false;
   @State hasMoreRestaurants: boolean = true;
   @State restaurantPage: number = 1;
   @State detailMenuExpanded: boolean = false;
+  @State detailReviewText: string = '';
+  @State detailReviewRating: number = 5;
+  @State isSubmittingReview: boolean = false;
   @State isLoading: boolean = false;
-  @State showAllRecommendations: boolean = false;
-  @State showDetail: boolean = false;
   @State detailRestaurant: Restaurant = EMPTY_RESTAURANT;
   @State restaurants: Restaurant[] = [];
   @State recommendations: Restaurant[] = [];
@@ -65,13 +72,8 @@ struct Index {
   @State dishRecommendations: DishRecommendation[] = [];
   @State selectedMenuImages: MenuImage[] = [];
   @State notice: string = '';
-  @State authToken: string = '';
-  @State profileSubpageVisible: boolean = false;
-  @State phoneInput: string = '';
-  @State codeInput: string = '';
-  @State isLoggedIn: boolean = false;
-  @State editNickname: string = '';
-  @State editHometown: string = '';
+  @State restaurantSwitchMode: boolean = false;
+  @StorageLink('restaurantAgentAuthToken') authToken: string = '';
   @State session: SessionState = {
     sessionId: `session-${Date.now()}`,
     stage: MealStage.PRE_MEAL,
@@ -85,6 +87,7 @@ struct Index {
     nickname: '游客',
     phone: '',
     hometown: '',
+    avatarUrl: '',
     dietaryRestrictions: ['花生'],
     tastePreferences: ['清淡'],
     cuisinePreferences: ['江浙菜'],
@@ -94,7 +97,7 @@ struct Index {
     {
       id: 'welcome',
       role: 'agent',
-      text: '你好，我是餐厅助手。告诉我今天想吃什么，比如“清淡的江浙菜”，我会结合模型与商家库帮你筛选。',
+      text: '你好，又到饭点了。告诉我今天想吃什么，比如“清淡的江浙菜”。',
       timestamp: Date.now(),
       restaurants: [],
       recognizedMenu: [],
@@ -133,7 +136,7 @@ struct Index {
     } as PersistedConversation);
   }
 
-  private async restartConversation(): Promise<void> {
+  private async restartConversation(completionNotice: string = ''): Promise<void> {
     this.session = {
       sessionId: `session-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
       stage: MealStage.PRE_MEAL,
@@ -145,7 +148,7 @@ struct Index {
     this.messages = [{
       id: `welcome-${Date.now()}`,
       role: 'agent',
-      text: '你好，我是餐厅助手。告诉我今天想吃什么，我会结合模型与商家库帮你筛选。',
+      text: '你好，我是吃了么。告诉我今天想吃什么。',
       timestamp: Date.now(),
       restaurants: [],
       recognizedMenu: [],
@@ -156,7 +159,7 @@ struct Index {
     this.dishRecommendations = [];
     this.selectedMenuImages = [];
     this.inputText = '';
-    this.notice = '';
+    this.notice = completionNotice;
     await this.persistConversation();
   }
 
@@ -302,6 +305,15 @@ struct Index {
         this.messages = [];
         this.recommendations = [];
         this.selectedMenuImages = [];
+        this.restaurantSwitchMode = false;
+      }
+      if (request.action === 'chat' && request.state.selectedRestaurantId.length > 0 &&
+        response.restaurants.length > 0 && request.state.stage !== MealStage.REVIEW) {
+        this.restaurantSwitchMode = true;
+      }
+      if (response.reviewSaved) {
+        await this.restartConversation('评价已保存，已为你开始新的对话。');
+        return response;
       }
       this.appendMessage('agent', response.reply, response.restaurants, response.recognizedMenu,
         response.dishRecommendations);
@@ -330,13 +342,11 @@ struct Index {
       this.notice = '已进入评价阶段，当前餐厅不能再更换。';
       return;
     }
-    const response: AgentResponse | undefined = await this.execute(this.createRequest('select_restaurant', '', item.id));
-    if (response !== undefined) {
-      this.detailRestaurant = item;
-      this.showDetail = false;
-      this.showAllRecommendations = false;
-      this.selectedTab = 1;
-    }
+    this.restaurantSwitchMode = false;
+    this.detailRestaurant = item;
+    this.pageStack.clear();
+    this.selectedTab = 1;
+    await this.execute(this.createRequest('select_restaurant', '', item.id));
   }
 
   private async markArrived(): Promise<void> {
@@ -349,6 +359,18 @@ struct Index {
 
   private async confirmMenu(): Promise<void> {
     await this.execute(this.createRequest('confirm_menu'));
+  }
+
+  private cancelRestaurantSwitch(): void {
+    this.restaurantSwitchMode = false;
+    const last: ChatMessage | undefined = this.messages.length > 0 ? this.messages[this.messages.length - 1] : undefined;
+    if (last !== undefined && last.role === 'agent' && last.restaurants.length > 0) {
+      const previous: ChatMessage | undefined = this.messages.length > 1 ? this.messages[this.messages.length - 2] : undefined;
+      const removeCount: number = previous?.role === 'user' ? 2 : 1;
+      this.messages = this.messages.slice(0, Math.max(0, this.messages.length - removeCount));
+      this.appendMessage('agent', '好的，继续当前餐厅。');
+    }
+    this.persistConversation();
   }
 
   private async pickMenuPhoto(): Promise<void> {
@@ -368,8 +390,8 @@ struct Index {
           base64: picked.base64
         } as MenuImage];
       const uploadText: string = picked.recognizedMenu.length > 0
-        ? `已选择菜单照片，端侧 OCR 提取到 ${picked.recognizedMenu.length} 道菜，正在与大模型视觉结果交叉确认`
-        : '已选择菜单照片，端侧 OCR 未提取到结构化菜品，正在尝试大模型图片识别';
+        ? `已上传菜单照片，识别到 ${picked.recognizedMenu.length} 道菜。`
+        : '已上传菜单照片，正在识别菜名和价格。';
       this.appendMessage('user', uploadText);
       await this.execute(this.createRequest('upload_menu'));
     } catch (error) {
@@ -380,10 +402,67 @@ struct Index {
     }
   }
 
-  private openDetail(item: Restaurant): void {
+  private async openDetail(item: Restaurant): Promise<void> {
+    this.notice = '';
     this.detailRestaurant = item;
     this.detailMenuExpanded = false;
-    this.showDetail = true;
+    this.detailReviewText = '';
+    this.detailReviewRating = 5;
+    this.pageStack.pushPathByName('detail', null);
+    this.isDetailLoading = true;
+    try {
+      const response: AgentResponse = await RestaurantAgentApi.getRestaurantDetail(item.id, this.session, this.profile);
+      if (response.selectedRestaurant !== undefined) {
+        this.detailRestaurant = response.selectedRestaurant;
+        this.mergeRestaurant(response.selectedRestaurant);
+      }
+    } catch (error) {
+      this.notice = `商家详情加载失败：${(error as Error).message}`;
+    } finally {
+      this.isDetailLoading = false;
+    }
+  }
+
+  private openProfileSubpage(name: string): void {
+    if (name.length === 0) {
+      this.pageStack.pop();
+      return;
+    }
+    this.pageStack.pushPathByName(name, null);
+  }
+
+  private async submitDetailReview(): Promise<void> {
+    const text: string = this.detailReviewText.trim();
+    if (this.authToken.length === 0 || this.profile.userId === 'guest') {
+      this.notice = '请先在“我的”页面登录后再发表评论。';
+      return;
+    }
+    if (text.length === 0 || this.isSubmittingReview) return;
+    this.isSubmittingReview = true;
+    this.notice = '';
+    try {
+      const review: RestaurantReview = await AuthApi.submitRestaurantReview(
+        this.authToken, this.detailRestaurant.id, text, this.detailReviewRating);
+      const reviews: RestaurantReview[] = [review].concat(this.detailRestaurant.reviews ?? []);
+      this.detailRestaurant = {
+        id: this.detailRestaurant.id, name: this.detailRestaurant.name, cuisine: this.detailRestaurant.cuisine,
+        tags: this.detailRestaurant.tags, address: this.detailRestaurant.address,
+        distanceKm: this.detailRestaurant.distanceKm, pricePerPerson: this.detailRestaurant.pricePerPerson,
+        rating: this.detailRestaurant.rating, open: this.detailRestaurant.open,
+        openStatusKnown: this.detailRestaurant.openStatusKnown, openingHours: this.detailRestaurant.openingHours,
+        source: this.detailRestaurant.source, reason: this.detailRestaurant.reason,
+        menuAvailable: this.detailRestaurant.menuAvailable, menu: this.detailRestaurant.menu, reviews,
+        imageUrl: this.detailRestaurant.imageUrl, images: this.detailRestaurant.images
+      } as Restaurant;
+      this.mergeRestaurant(this.detailRestaurant);
+      this.detailReviewText = '';
+      this.detailReviewRating = 5;
+      this.notice = '评论已发布。';
+    } catch (error) {
+      this.notice = (error as Error).message;
+    } finally {
+      this.isSubmittingReview = false;
+    }
   }
 
   private selectedRestaurant(): Restaurant | undefined {
@@ -472,63 +551,6 @@ struct Index {
     return '餐前选店';
   }
 
-  private togglePreference(type: string, value: string): void {
-    if (type === 'restriction') {
-      if (this.profile.dietaryRestrictions.includes(value)) {
-        this.profile.dietaryRestrictions = this.profile.dietaryRestrictions.filter((item: string) => item !== value);
-      } else {
-        this.profile.dietaryRestrictions = this.profile.dietaryRestrictions.concat([value]);
-      }
-    } else if (type === 'taste') {
-      if (this.profile.tastePreferences.includes(value)) {
-        this.profile.tastePreferences = this.profile.tastePreferences.filter((item: string) => item !== value);
-      } else {
-        this.profile.tastePreferences = this.profile.tastePreferences.concat([value]);
-      }
-    } else {
-      if (this.profile.cuisinePreferences.includes(value)) {
-        this.profile.cuisinePreferences = this.profile.cuisinePreferences.filter((item: string) => item !== value);
-      } else {
-        this.profile.cuisinePreferences = this.profile.cuisinePreferences.concat([value]);
-      }
-    }
-    this.profile = {
-      userId: this.profile.userId,
-      nickname: this.profile.nickname,
-      phone: this.profile.phone,
-      hometown: this.profile.hometown,
-      dietaryRestrictions: this.profile.dietaryRestrictions,
-      tastePreferences: this.profile.tastePreferences,
-      cuisinePreferences: this.profile.cuisinePreferences,
-      personalizationEnabled: this.profile.personalizationEnabled
-    } as UserProfile;
-  }
-
-  private login(): void {
-    if (!/^1\d{10}$/.test(this.phoneInput) || this.codeInput !== '123456') {
-      this.notice = '开发模式请输入 11 位手机号，验证码为 123456。';
-      return;
-    }
-    this.profile = {
-      userId: `user-${this.phoneInput.substring(7)}`,
-      nickname: this.editNickname.length > 0 ? this.editNickname : '餐厅用户',
-      phone: this.phoneInput,
-      hometown: this.editHometown,
-      dietaryRestrictions: this.profile.dietaryRestrictions,
-      tastePreferences: this.profile.tastePreferences,
-      cuisinePreferences: this.profile.cuisinePreferences,
-      personalizationEnabled: true
-    } as UserProfile;
-    this.session = {
-      sessionId: this.session.sessionId,
-      stage: this.session.stage,
-      selectedRestaurantId: this.session.selectedRestaurantId,
-      userId: this.profile.userId
-    } as SessionState;
-    this.isLoggedIn = true;
-    this.notice = '登录成功。生产环境请在 AGC 启用认证服务并替换开发验证码。';
-  }
-
   @Builder
   private PageHeader(title: string, subtitle: string) {
     Column({ space: 4 }) {
@@ -577,17 +599,26 @@ struct Index {
   private RestaurantCard(item: Restaurant, compact: boolean) {
     Column({ space: 10 }) {
       Row({ space: 12 }) {
-        Column() {
-          Text(item.name.substring(0, 1))
-            .fontSize(24)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
+        if ((item.imageUrl ?? '').length > 0) {
+          Image(item.imageUrl)
+            .width(56)
+            .height(56)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(12)
+            .clip(true)
+        } else {
+          Column() {
+            Text(item.name.substring(0, 1))
+              .fontSize(24)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+          }
+          .width(56)
+          .height(56)
+          .justifyContent(FlexAlign.Center)
+          .backgroundColor(item.menuAvailable ? COLOR_PRIMARY : '#D19173')
+          .borderRadius(12)
         }
-        .width(56)
-        .height(56)
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(item.menuAvailable ? COLOR_PRIMARY : '#D19173')
-        .borderRadius(16)
 
         Column({ space: 4 }) {
           Row({ space: 8 }) {
@@ -718,7 +749,7 @@ struct Index {
         .backgroundColor('#FFF0E8')
         .onClick(() => {
           this.recommendations = items;
-          this.showAllRecommendations = true;
+          this.pageStack.pushPathByName('recommendations', null);
         })
     }
     .padding(12)
@@ -775,7 +806,9 @@ struct Index {
       ForEach(items, (item: DishRecommendation) => {
         Column({ space: 4 }) {
           Text(item.name).fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT).width('100%')
-          Text(item.reason).fontSize(12).fontColor(COLOR_MUTED).width('100%')
+          if (item.reason.length > 0 && !item.reason.includes('基于服务端')) {
+            Text(item.reason).fontSize(12).fontColor(COLOR_MUTED).width('100%')
+          }
           Text(item.allergenWarning).fontSize(11).fontColor('#A4472B').width('100%')
         }
         .padding(10)
@@ -836,25 +869,29 @@ struct Index {
   private StageActions() {
     if (this.session.stage !== MealStage.PRE_MEAL && this.session.stage !== MealStage.END) {
       Row({ space: 6 }) {
-        if (this.session.stage === MealStage.RESTAURANT_SELECTED) {
-          this.FlowActionButton('我已抵达', () => this.markArrived())
-        }
-        if (this.session.stage === MealStage.ARRIVED) {
-          this.FlowActionButton('上传菜单', () => this.pickMenuPhoto())
-        }
-        if (this.session.stage === MealStage.MENU_READY) {
-          this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
-          this.FlowActionButton('确认菜单', () => this.confirmMenu())
-        }
-        if (this.session.stage === MealStage.DINING) {
-          this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
-          this.FlowActionButton('就餐完毕', () => this.finishMeal())
-        }
-        if (this.session.stage === MealStage.REVIEW) {
-          this.FlowActionButton('写下体验', () => this.inputText = '味道不错，服务也很好')
-        }
-        if (this.canChangeRestaurant()) {
-          this.FlowActionButton('换选餐厅', () => this.selectedTab = 0)
+        if (this.restaurantSwitchMode) {
+          this.FlowActionButton('不用换了', () => this.cancelRestaurantSwitch())
+        } else {
+          if (this.session.stage === MealStage.RESTAURANT_SELECTED) {
+            this.FlowActionButton('我已抵达', () => this.markArrived())
+          }
+          if (this.session.stage === MealStage.ARRIVED) {
+            this.FlowActionButton('上传菜单', () => this.pickMenuPhoto())
+          }
+          if (this.session.stage === MealStage.MENU_READY) {
+            this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
+            this.FlowActionButton('确认菜单', () => this.confirmMenu())
+          }
+          if (this.session.stage === MealStage.DINING) {
+            this.FlowActionButton('继续上传', () => this.pickMenuPhoto())
+            this.FlowActionButton('就餐完毕', () => this.finishMeal())
+          }
+          if (this.session.stage === MealStage.REVIEW) {
+            this.FlowActionButton('写下体验', () => this.inputText = '味道不错，服务也很好')
+          }
+          if (this.canChangeRestaurant()) {
+            this.FlowActionButton('换选餐厅', () => this.selectedTab = 0)
+          }
         }
       }
       .width('100%')
@@ -868,7 +905,7 @@ struct Index {
     Column() {
       Row() {
         Column({ space: 4 }) {
-          Text('餐厅助手').fontSize(26).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
+          Text('吃了么').fontSize(26).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
           Text(this.stageLabel()).fontSize(13).fontColor(COLOR_MUTED)
         }
         .alignItems(HorizontalAlign.Start)
@@ -1066,148 +1103,61 @@ struct Index {
   }
 
   @Builder
-  private PreferenceSection(title: string, type: string, values: string[], selected: string[]) {
-    Column({ space: 8 }) {
-      Text(title).fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT).width('100%')
-      Flex({ wrap: FlexWrap.Wrap, space: { main: LengthMetrics.vp(8), cross: LengthMetrics.vp(8) } }) {
-        ForEach(values, (value: string) => {
-          this.Chip(value, selected.includes(value), () => this.togglePreference(type, value))
-        })
-      }
-      .width('100%')
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%')
-  }
-
-  @Builder
-  private ProfilePage() {
-    Column() {
-      this.PageHeader('我的', '偏好可选填，未登录也能使用基础推荐')
-      Scroll() {
-        Column({ space: 14 }) {
-          if (!this.isLoggedIn) {
-            Column({ space: 10 }) {
-              Text('手机号登录 / 注册').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-              TextInput({ text: this.phoneInput, placeholder: '请输入手机号' })
-                .type(InputType.PhoneNumber)
-                .onChange((value: string) => this.phoneInput = value)
-              TextInput({ text: this.codeInput, placeholder: '开发验证码：123456' })
-                .type(InputType.Number)
-                .onChange((value: string) => this.codeInput = value)
-              Button('登录 / 注册')
-                .width('100%')
-                .backgroundColor(COLOR_PRIMARY)
-                .onClick(() => this.login())
-              Text('生产环境需启用 AGC 认证服务，不应保留固定验证码。')
-                .fontSize(11).fontColor(COLOR_MUTED).width('100%')
-            }
-            .padding(16)
-            .backgroundColor(Color.White)
-            .borderRadius(20)
-            .width('100%')
-          } else {
-            Row({ space: 12 }) {
-              Text(this.profile.nickname.substring(0, 1))
-                .fontSize(24).fontWeight(FontWeight.Bold).fontColor(Color.White)
-                .width(52).height(52).textAlign(TextAlign.Center)
-                .backgroundColor(COLOR_PRIMARY).borderRadius(26)
-              Column({ space: 3 }) {
-                Text(this.profile.nickname).fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-                Text(this.profile.phone).fontSize(12).fontColor(COLOR_MUTED)
-              }
-              .alignItems(HorizontalAlign.Start)
-            }
-            .padding(16)
-            .backgroundColor(Color.White)
-            .borderRadius(20)
-            .width('100%')
-          }
-
-          Column({ space: 14 }) {
-            Text('饮食偏好').fontSize(18).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-            this.PreferenceSection('忌口 / 过敏原', 'restriction', ['花生', '海鲜', '乳制品', '牛肉'],
-              this.profile.dietaryRestrictions)
-            this.PreferenceSection('口味偏好', 'taste', ['清淡', '少油', '微辣', '鲜香'],
-              this.profile.tastePreferences)
-            this.PreferenceSection('菜系偏好', 'cuisine', ['江浙菜', '杭帮菜', '粤菜', '川菜', '素食'],
-              this.profile.cuisinePreferences)
-            Row() {
-              Column({ space: 3 }) {
-                Text('个性化推荐').fontSize(14).fontWeight(FontWeight.Medium).fontColor(COLOR_TEXT)
-                Text('允许使用上述偏好参与排序').fontSize(11).fontColor(COLOR_MUTED)
-              }
-              .alignItems(HorizontalAlign.Start)
-              .layoutWeight(1)
-              Toggle({ type: ToggleType.Switch, isOn: this.profile.personalizationEnabled })
-                .selectedColor(COLOR_PRIMARY)
-                .onChange((value: boolean) => {
-                  this.profile.personalizationEnabled = value;
-                  this.profile = {
-                    userId: this.profile.userId,
-                    nickname: this.profile.nickname,
-                    phone: this.profile.phone,
-                    hometown: this.profile.hometown,
-                    dietaryRestrictions: this.profile.dietaryRestrictions,
-                    tastePreferences: this.profile.tastePreferences,
-                    cuisinePreferences: this.profile.cuisinePreferences,
-                    personalizationEnabled: value
-                  } as UserProfile;
-                })
-            }
-            .width('100%')
-          }
-          .padding(16)
-          .backgroundColor(Color.White)
-          .borderRadius(20)
-          .width('100%')
-
-          Column({ space: 8 }) {
-            Text('隐私与安全').fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-            Text('菜单识别可能遗漏过敏原；系统不会把模型猜测当作食材事实。你可以关闭个性化推荐，并在生产版本中申请删除个人数据。')
-              .fontSize(12).lineHeight(19).fontColor(COLOR_MUTED).width('100%')
-          }
-          .padding(16)
-          .backgroundColor('#FFF4DD')
-          .borderRadius(18)
-          .width('100%')
-        }
-        .padding({ left: 14, right: 14, bottom: 20 })
-      }
-      .scrollBar(BarState.Off)
-      .layoutWeight(1)
-    }
-    .width('100%')
-    .height('100%')
-  }
-
-  @Builder
   private DetailPage() {
     Column() {
       Row({ space: 12 }) {
         Button('‹').type(ButtonType.Circle).width(38).height(38).fontSize(24)
-          .fontColor(COLOR_TEXT).backgroundColor('#FFF0E8').onClick(() => this.showDetail = false)
+          .fontColor(COLOR_TEXT).backgroundColor('#FFF0E8').onClick(() => this.pageStack.pop())
         Text('商家详情').fontSize(20).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).layoutWeight(1)
       }
       .padding({ left: 14, right: 14, top: 14, bottom: 10 })
       .width('100%')
 
+      if (this.notice.length > 0) {
+        Text(this.notice)
+          .fontSize(13)
+          .fontColor(COLOR_PRIMARY_DARK)
+          .backgroundColor('#FFF0E8')
+          .borderRadius(8)
+          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+          .margin({ left: 14, right: 14, bottom: 8 })
+          .width('auto')
+      }
+
       Scroll() {
         Column({ space: 16 }) {
-          Column({ space: 8 }) {
-            Text(this.detailRestaurant.name).fontSize(28).fontWeight(FontWeight.Bold).fontColor(Color.White).width('100%')
-            Text(`${this.detailRestaurant.cuisine}` +
-              `${this.detailRestaurant.rating > 0 ? ` · ★ ${this.detailRestaurant.rating.toFixed(1)}` : ''}` +
-              `${this.detailRestaurant.pricePerPerson > 0 ? ` · ¥${this.detailRestaurant.pricePerPerson}/人` : ' · 人均待补充'}`)
-              .fontSize(14).fontColor('#FFF4EE').width('100%')
-            Text(this.detailRestaurant.address).fontSize(12).fontColor('#FFF4EE').width('100%')
+          Stack({ alignContent: Alignment.BottomStart }) {
+            if ((this.detailRestaurant.imageUrl ?? '').length > 0) {
+              Image(this.detailRestaurant.imageUrl)
+                .width('100%').height(180).objectFit(ImageFit.Cover)
+            }
+            Column({ space: 8 }) {
+              if (this.isDetailLoading) {
+                LoadingProgress().width(20).height(20).color(Color.White)
+              }
+              Text(this.detailRestaurant.name)
+                .fontSize(28).fontWeight(FontWeight.Bold).fontColor(Color.White).width('100%')
+              Text(`${this.detailRestaurant.cuisine}` +
+                `${this.detailRestaurant.rating > 0 ? ` · ★ ${this.detailRestaurant.rating.toFixed(1)}` : ''}` +
+                `${this.detailRestaurant.pricePerPerson > 0 ? ` · ¥${this.detailRestaurant.pricePerPerson}/人` : ' · 人均待补充'}`)
+                .fontSize(14).fontColor('#FFF4EE').width('100%')
+              Text(this.detailRestaurant.address).fontSize(12).fontColor('#FFF4EE').width('100%')
+            }
+            .padding(22).height(180).justifyContent(FlexAlign.End).width('100%')
+            .backgroundColor((this.detailRestaurant.imageUrl ?? '').length > 0 ? '#66000000' : COLOR_PRIMARY)
           }
-          .padding(22)
-          .height(150)
-          .justifyContent(FlexAlign.End)
-          .backgroundColor(COLOR_PRIMARY)
-          .borderRadius(24)
-          .width('100%')
+          .height(180).borderRadius(24).clip(true).width('100%')
+
+          if ((this.detailRestaurant.images?.length ?? 0) > 1) {
+            Scroll() {
+              Row({ space: 8 }) {
+                ForEach(this.detailRestaurant.images ?? [], (photo: RestaurantPhoto) => {
+                  Image(photo.url).width(94).height(70).objectFit(ImageFit.Cover).borderRadius(8)
+                }, (photo: RestaurantPhoto) => photo.url)
+              }
+            }
+            .height(74).width('100%').scrollable(ScrollDirection.Horizontal).scrollBar(BarState.Off)
+          }
 
           Column({ space: 8 }) {
             Text('推荐理由').fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
@@ -1253,6 +1203,38 @@ struct Index {
           Column({ space: 10 }) {
             Text(`用餐评价 (${this.detailRestaurant.reviews?.length ?? 0})`)
               .fontSize(16).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
+            if (this.authToken.length > 0 && this.profile.userId !== 'guest') {
+              Column({ space: 9 }) {
+                Row({ space: 4 }) {
+                  Text('评分').fontSize(12).fontColor(COLOR_MUTED)
+                  ForEach([1, 2, 3, 4, 5], (value: number) => {
+                    Button('★')
+                      .type(ButtonType.Normal)
+                      .width(30).height(30).fontSize(17)
+                      .fontColor(value <= this.detailReviewRating ? '#C27A00' : '#CFC4BE')
+                      .backgroundColor(Color.Transparent)
+                      .onClick(() => this.detailReviewRating = value)
+                  })
+                }
+                .width('100%')
+                TextArea({ text: this.detailReviewText, placeholder: '分享味道、服务或环境体验' })
+                  .height(86).fontSize(13).backgroundColor('#FFFDFC').borderRadius(12)
+                  .border({ width: 1, color: COLOR_LINE })
+                  .onChange((value: string) => this.detailReviewText = value)
+                Button(this.isSubmittingReview ? '发布中…' : '发表评论')
+                  .type(ButtonType.Normal).height(38).width('100%').fontSize(13)
+                  .fontColor(Color.White).backgroundColor(COLOR_PRIMARY).borderRadius(19)
+                  .enabled(this.detailReviewText.trim().length > 0 && !this.isSubmittingReview)
+                  .onClick(() => this.submitDetailReview())
+              }
+              .padding({ bottom: 4 }).width('100%')
+            } else {
+              Text('登录后可直接发表评论').fontSize(12).fontColor(COLOR_PRIMARY_DARK).width('100%')
+                .onClick(() => {
+                  this.pageStack.clear();
+                  this.selectedTab = 2;
+                })
+            }
             if ((this.detailRestaurant.reviews?.length ?? 0) === 0) {
               Text('暂无用餐评价').fontSize(13).fontColor(COLOR_MUTED).width('100%')
             } else {
@@ -1263,7 +1245,8 @@ struct Index {
                       Text(`★ ${review.rating.toFixed(1)}`).fontSize(12).fontColor('#B36B00')
                     }
                     Blank()
-                    Text(review.createdAt.substring(0, 10)).fontSize(11).fontColor(COLOR_MUTED)
+                    Text(`${review.authorName ?? '匿名用户'} · ${this.formatBeijingTime(review.createdAt)}`)
+                      .fontSize(11).fontColor(COLOR_MUTED)
                   }
                   .width('100%')
                   Text(review.text).fontSize(13).lineHeight(20).fontColor(COLOR_TEXT).width('100%')
@@ -1301,7 +1284,7 @@ struct Index {
     Column() {
       Row({ space: 12 }) {
         Button('‹').type(ButtonType.Circle).width(38).height(38).fontSize(24)
-          .fontColor(COLOR_TEXT).backgroundColor('#FFF0E8').onClick(() => this.showAllRecommendations = false)
+          .fontColor(COLOR_TEXT).backgroundColor('#FFF0E8').onClick(() => this.pageStack.pop())
         Column({ space: 2 }) {
           Text('全部推荐').fontSize(20).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
           Text('保持当前条件与排序').fontSize(11).fontColor(COLOR_MUTED)
@@ -1349,8 +1332,61 @@ struct Index {
     .onClick(() => this.selectedTab = index)
   }
 
+  private twoDigits(value: number): string {
+    return value < 10 ? `0${value}` : `${value}`;
+  }
+
+  private formatBeijingTime(value: string): string {
+    const timestamp: number = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return value.substring(0, 16).replace('T', ' ');
+    const date: Date = new Date(timestamp + 8 * 60 * 60 * 1000);
+    return `${date.getUTCFullYear()}-${this.twoDigits(date.getUTCMonth() + 1)}-${this.twoDigits(date.getUTCDate())} ` +
+      `${this.twoDigits(date.getUTCHours())}:${this.twoDigits(date.getUTCMinutes())}`;
+  }
+
+  @Builder
+  private SecondaryPage(name: string) {
+    if (name === 'detail') {
+      NavDestination() {
+        this.DetailPage()
+      }
+      .hideTitleBar(true)
+      .systemTransition(NavigationSystemTransitionType.SLIDE_RIGHT)
+      .onBackPressed(() => {
+        this.pageStack.pop();
+        return true;
+      })
+    } else if (name === 'recommendations') {
+      NavDestination() {
+        this.AllRecommendationsPage()
+      }
+      .hideTitleBar(true)
+      .systemTransition(NavigationSystemTransitionType.SLIDE_RIGHT)
+      .onBackPressed(() => {
+        this.pageStack.pop();
+        return true;
+      })
+    } else if (name === 'login' || name === 'profile') {
+      NavDestination() {
+        ProfilePage({
+          profile: this.profile,
+          session: this.session,
+          authToken: this.authToken,
+          activeSubpage: name,
+          onSubpageChange: (next: string) => this.openProfileSubpage(next)
+        })
+      }
+      .hideTitleBar(true)
+      .systemTransition(NavigationSystemTransitionType.SLIDE_RIGHT)
+      .onBackPressed(() => {
+        this.pageStack.pop();
+        return true;
+      })
+    }
+  }
+
   build() {
-    Stack({ alignContent: Alignment.Bottom }) {
+    Navigation(this.pageStack) {
       Column() {
         Column() {
           if (this.selectedTab === 0) {
@@ -1358,31 +1394,26 @@ struct Index {
           } else if (this.selectedTab === 1) {
             this.ChatPage()
           } else {
-            UserProfilePage({
+            ProfilePage({
               profile: this.profile,
               session: this.session,
               authToken: this.authToken,
-              onLoginPageChange: (show: boolean) => this.profileSubpageVisible = show
+              activeSubpage: '',
+              onSubpageChange: (name: string) => this.openProfileSubpage(name)
             })
           }
         }
         .layoutWeight(1)
         .width('100%')
-        if (!this.profileSubpageVisible) {
-          this.BottomNavigation()
-        }
+        this.BottomNavigation()
       }
       .width('100%')
       .height('100%')
       .backgroundColor(COLOR_BG)
-
-      if (this.showAllRecommendations) {
-        this.AllRecommendationsPage()
-      }
-      if (this.showDetail) {
-        this.DetailPage()
-      }
     }
+    .mode(NavigationMode.Stack)
+    .hideTitleBar(true)
+    .navDestination(this.SecondaryPage)
     .width('100%')
     .height('100%')
     .backgroundColor(COLOR_BG)

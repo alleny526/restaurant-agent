@@ -69,6 +69,20 @@ function mergeMenuItems(existingItems, newItems) {
   return merged;
 }
 
+function normalizeMenuItems(items) {
+  return (Array.isArray(items) ? items : []).slice(0, 100).map((item, index) => ({
+    id: String(item.id ?? `menu-${index + 1}`).slice(0, 128),
+    name: String(item.name ?? '').trim().slice(0, 100),
+    category: String(item.category ?? '待分类').trim().slice(0, 40),
+    price: Math.max(0, Math.min(Number(item.price) || 0, 100000)),
+    ingredients: Array.isArray(item.ingredients)
+      ? item.ingredients.map((value) => String(value).trim().slice(0, 50)).filter(Boolean).slice(0, 30) : [],
+    tags: Array.isArray(item.tags)
+      ? item.tags.map((value) => String(value).trim().slice(0, 30)).filter(Boolean).slice(0, 20) : [],
+    confidence: Math.max(0, Math.min(Number(item.confidence) || 0, 1))
+  })).filter((item) => item.name.length > 0);
+}
+
 function publicReviews(reviews, restaurantId) {
   return reviews
     .filter((item) => item.restaurantId === restaurantId)
@@ -78,6 +92,7 @@ function publicReviews(reviews, restaurantId) {
       rating: Number(item.rating) || 0,
       text: sanitizeReview(item.text ?? ''),
       tags: Array.isArray(item.tags) ? item.tags : [],
+      authorName: item.authorName ?? '匿名用户',
       createdAt: item.updatedAt ?? item.createdAt
     }));
 }
@@ -96,6 +111,8 @@ function appRestaurant(restaurant, reviews = []) {
     openStatusKnown: restaurant.openStatusKnown !== false,
     openingHours: restaurant.openingHours ?? '',
     source: restaurant.source ?? 'seed',
+    imageUrl: restaurant.imageUrl ?? '',
+    images: Array.isArray(restaurant.images) ? restaurant.images : [],
     reason: restaurantDescription(restaurant),
     menuAvailable: restaurant.menu.length > 0,
     menu: restaurant.menu,
@@ -107,7 +124,7 @@ function appDishRecommendation(item, warning) {
   return {
     menuItemId: item.id,
     name: item.name,
-    reason: '基于服务端菜单字段、置信度和已设置偏好生成。',
+    reason: '',
     allergenWarning: warning || '模型识别可能遗漏，请以餐厅实际说明为准。'
   };
 }
@@ -130,9 +147,62 @@ const ACTION_ALLOWED_STAGES = {
 };
 
 function wantsRestaurantCandidates(text, stage) {
-  if (stage === 'PRE_MEAL') return true;
   if (stage === 'REVIEW' || stage === 'END') return false;
+  if (/(不用换|不换了|不换|继续当前|还是这家|先不换)/.test(text)) return false;
+  if (/(更多|多几家|多一些|扩大|附近还有|换一批|再来|其他家|更多结果)/.test(text)) return true;
+  if (/^[\u4e00-\u9fffA-Za-z0-9·]{2,16}$/.test(String(text ?? '').trim()) &&
+    !/^(?:这道|什么|怎么|为什么|如何)/u.test(String(text ?? '').trim())) return true;
+  if (stage === 'PRE_MEAL') return true;
   return /(推荐|换|另|别家|餐厅|饭店|小馆|馆子|附近|哪家|哪里吃|想吃|口味|菜系|人均|预算|清淡|麻辣|火锅|烧烤|素食)/.test(text);
+}
+
+function wantsMoreResults(text) {
+  return /(更多|多几家|多一些|扩大|附近还有|换一批|再来|其他家|更多结果|尽量多)/.test(String(text ?? ''));
+}
+
+function mergeIntent(fallback, modelIntent) {
+  const model = modelIntent && typeof modelIntent === 'object' ? modelIntent : {};
+  const arrayFields = ['restaurantNames', 'dishes', 'cuisines', 'tastes', 'keywords'];
+  const merged = { ...fallback, ...model };
+  for (const field of arrayFields) {
+    merged[field] = [...new Set([
+      ...(Array.isArray(fallback?.[field]) ? fallback[field] : []),
+      ...(Array.isArray(model[field]) ? model[field] : [])
+    ].map((value) => String(value).trim()).filter(Boolean))];
+  }
+  for (const field of ['maxPrice', 'maxDistanceKm', 'minRating']) {
+    if (model[field] === undefined || model[field] === null || model[field] === '') merged[field] = fallback[field] ?? null;
+  }
+  if (typeof model.openNow !== 'boolean') merged.openNow = fallback.openNow;
+  merged.raw = fallback.raw;
+  return merged;
+}
+
+function searchQueryVariants(query, intent, expanded = false) {
+  const terms = [
+    ...(intent.restaurantNames ?? []),
+    ...(intent.dishes ?? []),
+    ...(intent.keywords ?? []),
+    ...(intent.cuisines ?? []),
+    ...(intent.tastes ?? [])
+  ].map((value) => String(value).trim()).filter(Boolean);
+  const variants = [];
+  const add = (value) => {
+    const normalized = String(value ?? '').trim();
+    if (normalized && !variants.includes(normalized)) variants.push(normalized);
+  };
+  for (const term of terms) add(term);
+  for (const dish of intent.dishes ?? []) {
+    if (/面/u.test(dish)) add('面馆');
+    if (/粉/u.test(dish)) add('粉面馆');
+    if (/[饼饭粥包子馄饨锅贴]/u.test(dish)) add(`${dish}小吃`);
+  }
+  if (terms.length === 0 || expanded) add(query);
+  if (expanded) {
+    add('餐厅');
+    add('美食');
+  }
+  return variants.slice(0, expanded ? 6 : 4);
 }
 
 function assertActionAllowed(action, stage) {
@@ -183,6 +253,7 @@ export class RestaurantOrchestrator {
     this.chat = providers.chat;
     this.places = providers.places;
     this.telemetry = providers.telemetry;
+    this.imageFetch = providers.imageFetch ?? globalThis.fetch;
     this.inFlightRequests = new Map();
   }
 
@@ -211,6 +282,78 @@ export class RestaurantOrchestrator {
     }
   }
 
+  async refreshPlacesMulti(queries, location = null, options = {}) {
+    const startedAt = Date.now();
+    const uniqueQueries = [...new Set((Array.isArray(queries) ? queries : [queries])
+      .map((value) => String(value ?? '').trim()).filter(Boolean))];
+    if (uniqueQueries.length === 0) uniqueQueries.push('餐厅');
+    const expanded = options.expanded === true;
+    const pageSize = Math.min(Math.max(Number(options.pageSize) || (expanded ? 25 : 20), 1), 25);
+    const pages = expanded ? [1, 2] : [1];
+    const results = await Promise.all(uniqueQueries.flatMap((term) => pages.map((page) =>
+      this.refreshPlaces(term, location, page, pageSize))));
+    const ids = [...new Set(results.flatMap((result) => result.restaurantIds ?? []))];
+    const warnings = [...new Set(results.map((result) => result.warning).filter(Boolean))];
+    const hasAmap = results.some((result) => result.source === 'amap');
+    return {
+      source: hasAmap ? 'amap' : (results.some((result) => result.source === 'sqlite-cache') ? 'sqlite-cache' : 'sqlite'),
+      refreshed: ids.length,
+      restaurantIds: ids,
+      warning: warnings.join(' '),
+      durationMs: Date.now() - startedAt
+    };
+  }
+
+  async restaurantDetail(restaurantId, requestState, profile) {
+    let restaurant = this.store.snapshot().restaurants.find((item) => item.id === restaurantId);
+    if (!restaurant) throw httpError(404, 'RESTAURANT_NOT_FOUND', '餐厅不存在');
+    let modelUsed = false;
+    const menuPhotos = (restaurant.images ?? []).filter((item) => item.menuCandidate).slice(0, 2);
+    if (restaurant.menu.length === 0 && menuPhotos.length > 0 && !restaurant.menuPhotoRecognitionAttemptedAt) {
+      const images = [];
+      for (const photo of menuPhotos) {
+        try {
+          const response = await this.imageFetch(photo.url, { signal: AbortSignal.timeout(8000) });
+          const contentType = response.headers.get('content-type') ?? 'image/jpeg';
+          const contentLength = Number(response.headers.get('content-length')) || 0;
+          if (!response.ok || !contentType.startsWith('image/') || contentLength > 4 * 1024 * 1024) continue;
+          const bytes = Buffer.from(await response.arrayBuffer());
+          if (bytes.length === 0 || bytes.length > 4 * 1024 * 1024) continue;
+          images.push({ fileName: photo.title || 'amap-menu.jpg', mimeType: contentType, base64: bytes.toString('base64') });
+        } catch {
+          // A failed image must not block opening the restaurant detail page.
+        }
+      }
+      const result = images.length > 0
+        ? await this.chat?.recognizeMenu?.(images, [], preferenceFacts(profile))
+        : null;
+      const recognized = result?.usedModel ? normalizeMenuItems(result.items) : [];
+      await this.store.transaction((state) => {
+        const saved = state.restaurants.find((item) => item.id === restaurantId);
+        if (!saved) return null;
+        saved.menuPhotoRecognitionAttemptedAt = nowIso();
+        if (recognized.length > 0) {
+          saved.menu = recognized;
+          saved.menuSource = 'amap-photo-vision';
+          saved.dataUpdatedAt = nowIso();
+        }
+        return saved;
+      });
+      modelUsed = recognized.length > 0;
+      restaurant = this.store.snapshot().restaurants.find((item) => item.id === restaurantId);
+    }
+    const state = this.store.snapshot();
+    return {
+      reply: restaurant.menu.length > 0 ? '商家详情与菜单已加载。' : '商家详情已加载。',
+      state: {
+        sessionId: requestState.sessionId || 'preview', stage: requestState.stage || 'PRE_MEAL',
+        selectedRestaurantId: requestState.selectedRestaurantId || '', userId: profile?.userId || 'guest'
+      },
+      restaurants: [], selectedRestaurant: appRestaurant(restaurant, state.reviews),
+      recognizedMenu: [], dishRecommendations: [], reviewSaved: false, modelUsed
+    };
+  }
+
   searchCandidates(restaurants, refresh) {
     if (refresh.source === 'amap') {
       const ids = new Set(refresh.restaurantIds);
@@ -223,23 +366,40 @@ export class RestaurantOrchestrator {
     return restaurants;
   }
 
-  async searchRestaurants(query, userId = '', limit = 5, location = null, profileOverride = null) {
+  async searchRestaurants(query, userId = '', limit = 5, location = null, profileOverride = null, options = {}) {
     const fallbackIntent = parseDiningIntent(query);
     const intentResult = await this.chat?.analyzeIntent?.(query, fallbackIntent) ??
       { intent: fallbackIntent, usedModel: false };
-    const intent = intentResult.intent;
-    const searchTerms = [...new Set([
-      ...(intent.keywords ?? []), ...(intent.cuisines ?? []), ...(intent.tastes ?? [])
-    ])].filter(Boolean).slice(0, 5);
-    const refresh = await this.refreshPlaces(searchTerms.join(' ') || query, location);
+    const intent = mergeIntent(fallbackIntent, intentResult.intent);
+    const expanded = options.expanded === true;
+    const resultLimit = expanded ? Math.max(limit, 12) : limit;
+    const searchQueries = searchQueryVariants(query, intent, expanded);
+    const refresh = await this.refreshPlacesMulti(searchQueries, location, {
+      expanded,
+      pageSize: expanded ? 25 : Math.max(20, resultLimit)
+    });
     const state = this.store.snapshot();
     const profile = profileOverride ?? state.users.find((item) => item.id === userId) ?? null;
     const databaseItems = await this.store.queryRestaurants({
       openNow: intent.openNow,
       maxPrice: intent.maxPrice ?? ''
     });
-    const candidates = this.searchCandidates(databaseItems, refresh);
-    const deterministic = recommendRestaurants(candidates, intent, profile, Math.max(limit, 12));
+    const localKeywordMatches = databaseItems.filter((item) => {
+      const haystack = [item.name, item.address, ...(item.cuisines ?? []), ...(item.tags ?? [])]
+        .join(' ').toLowerCase();
+      const menuText = (item.menu ?? []).flatMap((dish) => [dish.name, ...(dish.ingredients ?? []), ...(dish.tags ?? [])])
+        .join(' ').toLowerCase();
+      const terms = [...(intent.restaurantNames ?? []), ...(intent.dishes ?? [])]
+        .map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+      return terms.length > 0 && terms.some((term) => haystack.includes(term) || menuText.includes(term));
+    });
+    const candidatePool = this.searchCandidates(databaseItems, refresh);
+    const candidates = [...new Map([...candidatePool, ...localKeywordMatches]
+      .map((item) => [item.id, item])).values()].filter((item) =>
+      (intent.maxDistanceKm === null || intent.maxDistanceKm === undefined ||
+        (item.distanceMeters > 0 && item.distanceMeters <= intent.maxDistanceKm * 1000)) &&
+      (intent.minRating === null || intent.minRating === undefined || item.rating >= intent.minRating));
+    const deterministic = recommendRestaurants(candidates, intent, profile, Math.max(resultLimit, 12));
     const rankResult = await this.chat?.rankIds?.({
       userMessage: query,
       kind: '餐厅',
@@ -250,8 +410,8 @@ export class RestaurantOrchestrator {
       })),
       preferences: preferenceFacts(profile),
       fallbackIds: deterministic.map((item) => item.id),
-      limit
-    }) ?? { ids: deterministic.map((item) => item.id).slice(0, limit), usedModel: false };
+      limit: resultLimit
+    }) ?? { ids: deterministic.map((item) => item.id).slice(0, resultLimit), usedModel: false };
     const byId = new Map(deterministic.map((item) => [item.id, item]));
     const restaurants = rankResult.ids.map((id) => byId.get(id)).filter(Boolean);
     return {
@@ -272,7 +432,7 @@ export class RestaurantOrchestrator {
         menuStatus: 'NONE',
         intent: null,
         recognizedMenu: [],
-        messages: [message('agent', '你好，我是餐厅助手。告诉我今天想吃什么，我会基于真实商家数据为你推荐。')],
+        messages: [message('agent', '你好，我是吃了么。告诉我今天想吃什么，我会基于真实商家数据为你推荐。')],
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
@@ -355,6 +515,10 @@ export class RestaurantOrchestrator {
     const requestState = request?.state ?? {};
     const userId = request?.profile?.userId || requestState.userId || 'guest';
 
+    if (action === 'restaurant_detail') {
+      return this.restaurantDetail(String(request.restaurantId ?? ''), requestState, request.profile ?? null);
+    }
+
     if (action === 'discover') {
       const page = Math.min(Math.max(Number(request.page) || 1, 1), 100);
       const pageSize = Math.min(Math.max(Number(request.pageSize) || 20, 1), 25);
@@ -419,6 +583,8 @@ export class RestaurantOrchestrator {
 
   async enrichNodePayload(payload, request, action) {
     if (!payload?.message || payload.modelUsed === true || payload.modelAttempted === true) return payload;
+    // Fixed workflow actions already have concise deterministic copy. The model is reserved for free-form chat.
+    if (action !== 'chat' || payload.session.stage === 'END') return payload;
     const fallback = payload.message.text;
     const safeRequestMessage = payload.session.stage === 'END' || action === 'submit_review'
       ? sanitizeReview(request.message ?? '')
@@ -519,7 +685,8 @@ export class RestaurantOrchestrator {
     if (!text?.trim()) throw httpError(400, 'INVALID_TEXT', '消息内容不能为空');
     const existing = this.store.snapshot().sessions.find((item) => item.id === sessionId);
     const candidateResult = existing && wantsRestaurantCandidates(text.trim(), existing.stage)
-      ? await this.searchRestaurants(text.trim(), userId, 5, location, existing.profileSnapshot ?? null)
+      ? await this.searchRestaurants(text.trim(), userId, wantsMoreResults(text.trim()) ? 12 : 5,
+        location, existing.profileSnapshot ?? null, { expanded: wantsMoreResults(text.trim()) })
       : null;
     return this.store.transaction(async (state) => {
       const session = state.sessions.find((item) => item.id === sessionId);
@@ -540,18 +707,13 @@ export class RestaurantOrchestrator {
         const reviewText = sanitizeReview(text);
         const latestUserMessage = session.messages.at(-1);
         if (latestUserMessage?.role === 'user') latestUserMessage.text = reviewText;
-        const duplicate = state.reviews.find((item) => item.userId === (session.userId || userId) &&
-          item.restaurantId === session.selectedRestaurantId && Date.now() - Date.parse(item.createdAt) < 2 * 60 * 60 * 1000);
-        if (duplicate) {
-          duplicate.text = reviewText;
-          duplicate.updatedAt = nowIso();
-        } else {
-          state.reviews.push({
-            id: randomUUID(), userId: session.userId || userId || 'anonymous',
-            restaurantId: session.selectedRestaurantId, sessionId: session.id,
-            rating: null, text: reviewText, tags: [], createdAt: nowIso()
-          });
-        }
+        const createdAt = nowIso();
+        state.reviews.push({
+          id: randomUUID(), userId: session.userId || userId || 'anonymous',
+          authorName: profile?.nickname || (session.userId || userId ? '已登录用户' : '游客'),
+          restaurantId: session.selectedRestaurantId, sessionId: session.id,
+          rating: null, text: reviewText, tags: [], createdAt
+        });
         session.stage = 'END';
         const reply = message('agent', '已将评价与本次餐厅和会话绑定保存，谢谢反馈。需要时可以开始新一轮推荐。');
         session.messages.push(reply);
@@ -677,7 +839,7 @@ export class RestaurantOrchestrator {
       const payload = await this.acceptRecognizedMenu(
         sessionId, deviceItems, lowConfidenceFields, 'device-ocr', true
       );
-      payload.message.text = `大模型图片识别暂不可用，已采用端侧 OCR。${payload.message.text}`;
+      payload.message.text = `已根据图片文字完成识别。${payload.message.text}`;
       payload.modelAttempted = images.length > 0;
       payload.modelDurationMs = modelVision.durationMs ?? 0;
       payload.modelFallback = images.length > 0;
@@ -686,7 +848,7 @@ export class RestaurantOrchestrator {
     }
 
     const payload = await this.recognizeMenu(sessionId, images);
-    payload.message.text = `大模型图片识别暂不可用，已采用备用识别。${payload.message.text}`;
+    payload.message.text = `已完成菜单识别。${payload.message.text}`;
     payload.modelAttempted = true;
     payload.modelDurationMs = modelVision.durationMs ?? 0;
     payload.modelFallback = true;
@@ -771,17 +933,8 @@ export class RestaurantOrchestrator {
       throw httpError(400, 'MENU_ITEMS_REQUIRED', '菜单识别结果不能为空');
     }
     if (items.length > 100) throw httpError(413, 'TOO_MANY_MENU_ITEMS', '一次最多提交 100 道菜');
-    const normalized = items.map((item, index) => ({
-      id: String(item.id ?? `menu-${index + 1}`).slice(0, 128),
-      name: String(item.name ?? '').trim().slice(0, 100),
-      category: String(item.category ?? '待分类').trim().slice(0, 40),
-      price: Math.max(0, Math.min(Number(item.price) || 0, 100000)),
-      ingredients: Array.isArray(item.ingredients)
-        ? item.ingredients.map((value) => String(value).trim().slice(0, 50)).filter(Boolean).slice(0, 30) : [],
-      tags: Array.isArray(item.tags)
-        ? item.tags.map((value) => String(value).trim().slice(0, 30)).filter(Boolean).slice(0, 20) : [],
-      confidence: Math.max(0, Math.min(Number(item.confidence) || 0, 1))
-    }));
+    const normalized = normalizeMenuItems(items);
+    if (normalized.length === 0) throw httpError(400, 'INVALID_MENU_ITEM', '每道菜都必须包含名称');
     if (normalized.some((item) => !item.name)) {
       throw httpError(400, 'INVALID_MENU_ITEM', '每道菜都必须包含名称');
     }

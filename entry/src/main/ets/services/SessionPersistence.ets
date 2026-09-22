@@ -2,9 +2,6 @@ import { Context } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { ChatMessage, DishRecommendation, MenuItem, SessionState } from '../model/Models';
 
-const STORE_NAME: string = 'restaurant_agent_session';
-const CONVERSATION_KEY: string = 'active_conversation';
-
 export interface PersistedConversation {
   session: SessionState;
   messages: ChatMessage[];
@@ -13,30 +10,28 @@ export interface PersistedConversation {
 }
 
 export class SessionPersistence {
+  private static readonly FILE_NAME: string = 'restaurant_agent_state';
+  private static readonly KEY: string = 'active_conversation';
+
   static async load(context: Context): Promise<PersistedConversation | undefined> {
     try {
-      const store: preferences.Preferences = await preferences.getPreferences(context, STORE_NAME);
-      const value: preferences.ValueType = await store.get(CONVERSATION_KEY, '');
+      const store = await preferences.getPreferences(context, SessionPersistence.FILE_NAME);
+      const value = await store.get(SessionPersistence.KEY, '');
       if (typeof value !== 'string' || value.length === 0) return undefined;
-
-      const conversation: PersistedConversation = JSON.parse(value) as PersistedConversation;
-      if (conversation.session === undefined || conversation.messages === undefined ||
-        conversation.recognizedMenu === undefined || conversation.dishRecommendations === undefined) {
-        return undefined;
-      }
-      return conversation;
+      const parsed = JSON.parse(value) as PersistedConversation;
+      if (parsed.session === undefined || parsed.session.sessionId.length === 0) return undefined;
+      return parsed;
     } catch (_error) {
       return undefined;
     }
   }
 
-  static async save(context: Context, conversation: PersistedConversation): Promise<void> {
+  static async save(context: Context, value: PersistedConversation): Promise<void> {
     try {
-      const store: preferences.Preferences = await preferences.getPreferences(context, STORE_NAME);
-      await store.put(CONVERSATION_KEY, JSON.stringify(conversation));
+      const store = await preferences.getPreferences(context, SessionPersistence.FILE_NAME);
+      await store.put(SessionPersistence.KEY, JSON.stringify(value));
       await store.flush();
     } catch (_error) {
-      // Persistence failure should not interrupt the active conversation.
     }
   }
 }

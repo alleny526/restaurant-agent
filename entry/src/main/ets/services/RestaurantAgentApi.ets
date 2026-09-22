@@ -1,4 +1,4 @@
-import { AgentRequest, AgentResponse, MealStage, UserLocation } from '../model/Models';
+import { AgentRequest, AgentResponse, MealStage, SessionState, UserLocation, UserProfile } from '../model/Models';
 import { ApiClient } from './ApiClient';
 import { AppConfig } from './AppConfig';
 import { MockAgent } from './MockAgent';
@@ -63,9 +63,17 @@ export class RestaurantAgentApi {
       pageSize,
       state: { sessionId: 'preview', stage: MealStage.PRE_MEAL, selectedRestaurantId: '', userId: 'guest' },
       profile: {
-        userId: 'guest', nickname: '', phone: '', hometown: '', dietaryRestrictions: [], tastePreferences: [],
+        userId: 'guest', nickname: '', phone: '', hometown: '', avatarUrl: '', dietaryRestrictions: [], tastePreferences: [],
         cuisinePreferences: [], personalizationEnabled: true
       }
+    } as AgentRequest);
+  }
+
+  static async getRestaurantDetail(restaurantId: string, state: SessionState,
+    profile: UserProfile): Promise<AgentResponse> {
+    return RestaurantAgentApi.execute({
+      action: 'restaurant_detail', clientRequestId: `detail-${restaurantId}-${Date.now()}`,
+      message: '', restaurantId, menuImages: [], recognizedMenu: [], rating: 0, state, profile
     } as AgentRequest);
   }
 }

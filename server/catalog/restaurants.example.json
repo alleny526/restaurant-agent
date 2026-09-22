@@ -1,0 +1,27 @@
+{
+  "restaurants": [
+    {
+      "id": "manual-demo-restaurant",
+      "externalPoiId": "",
+      "name": "示例授权餐厅",
+      "address": "请替换为有权使用的真实地址",
+      "location": { "longitude": 0, "latitude": 0 },
+      "cuisines": ["家常菜"],
+      "tags": ["清淡"],
+      "averagePrice": 80,
+      "rating": 0,
+      "openStatusKnown": false,
+      "openingHours": "",
+      "menu": [
+        {
+          "id": "manual-demo-dish",
+          "name": "示例菜品",
+          "category": "热菜",
+          "price": 38,
+          "ingredients": ["请按已确认信息填写"],
+          "tags": ["清淡"]
+        }
+      ]
+    }
+  ]
+}

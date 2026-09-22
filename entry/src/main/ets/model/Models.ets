@@ -41,6 +41,14 @@ export interface Restaurant {
   menuAvailable: boolean;
   menu: MenuItem[];
   reviews?: RestaurantReview[];
+  imageUrl?: string;
+  images?: RestaurantPhoto[];
+}
+
+export interface RestaurantPhoto {
+  title: string;
+  url: string;
+  menuCandidate: boolean;
 }
 
 export interface RestaurantReview {
@@ -49,6 +57,7 @@ export interface RestaurantReview {
   text: string;
   tags: string[];
   createdAt: string;
+  authorName?: string;
 }
 
 export interface DishRecommendation {
@@ -73,6 +82,7 @@ export interface UserProfile {
   nickname: string;
   phone: string;
   hometown: string;
+  avatarUrl: string;
   dietaryRestrictions: string[];
   tastePreferences: string[];
   cuisinePreferences: string[];
@@ -84,6 +94,7 @@ export interface AuthUser {
   phone: string;
   nickname: string;
   hometown: string;
+  avatarUrl: string;
   dietaryRestrictions: string[];
   tastePreferences: string[];
   cuisinePreferences: string[];

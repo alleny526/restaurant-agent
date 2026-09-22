@@ -16,13 +16,9 @@ export struct ProfilePage {
   @Link profile: UserProfile;
   @Link session: SessionState;
   @Link authToken: string;
-  onLoginPageChange: (show: boolean) => void = () => {};
+  activeSubpage: string = '';
+  onSubpageChange: (name: string) => void = () => {};
 
-  @State showLogin: boolean = false;
-  @State showPreferenceEditor: boolean = false;
-  @State editNickname: string = '';
-  @State editHometown: string = '';
-  @State isLoading: boolean = false;
   @State notice: string = '';
 
   aboutToAppear(): void {
@@ -54,6 +50,7 @@ export struct ProfilePage {
       nickname: user.nickname,
       phone: user.phone,
       hometown: user.hometown,
+      avatarUrl: user.avatarUrl ?? '',
       dietaryRestrictions: user.dietaryRestrictions,
       tastePreferences: user.tastePreferences,
       cuisinePreferences: user.cuisinePreferences,
@@ -65,47 +62,39 @@ export struct ProfilePage {
       selectedRestaurantId: this.session.selectedRestaurantId,
       userId: user.id
     } as SessionState;
-    this.editNickname = user.nickname;
-    this.editHometown = user.hometown;
   }
 
   private loginSucceeded(user: AuthUser): void {
     this.applyUser(user);
-    this.showLogin = false;
-    this.onLoginPageChange(false);
+    this.onSubpageChange('');
     this.notice = '登录成功，个人资料已同步';
   }
 
   private openLogin(): void {
-    this.showLogin = true;
-    this.onLoginPageChange(true);
+    this.onSubpageChange('login');
   }
 
   private closeLogin(): void {
-    this.showLogin = false;
-    this.onLoginPageChange(false);
+    this.onSubpageChange('');
   }
 
   private openPreferenceEditor(): void {
-    this.showPreferenceEditor = true;
-    this.onLoginPageChange(true);
+    this.onSubpageChange('profile');
   }
 
   private closePreferenceEditor(): void {
-    this.showPreferenceEditor = false;
-    this.onLoginPageChange(false);
+    this.onSubpageChange('');
   }
 
   private preferencesSaved(): void {
-    this.showPreferenceEditor = false;
-    this.onLoginPageChange(false);
-    this.notice = this.isLoggedIn() ? '饮食偏好已同步到账号' : '饮食偏好已更新';
+    this.onSubpageChange('');
+    this.notice = this.isLoggedIn() ? '个人信息已同步到账号' : '个人信息已更新';
   }
 
   private logout(): void {
     this.authToken = '';
     this.profile = {
-      userId: 'guest', nickname: '游客', phone: '', hometown: '', dietaryRestrictions: ['花生'],
+      userId: 'guest', nickname: '游客', phone: '', hometown: '', avatarUrl: '', dietaryRestrictions: ['花生'],
       tastePreferences: ['清淡'], cuisinePreferences: ['江浙菜'], personalizationEnabled: true
     } as UserProfile;
     this.session = {
@@ -114,38 +103,7 @@ export struct ProfilePage {
       selectedRestaurantId: this.session.selectedRestaurantId,
       userId: 'guest'
     } as SessionState;
-    this.editNickname = '';
-    this.editHometown = '';
     this.notice = '已退出登录，当前为游客模式';
-  }
-
-  private async saveProfile(): Promise<void> {
-    if (!this.isLoggedIn()) {
-      this.openLogin();
-      return;
-    }
-    const nickname: string = this.editNickname.trim().length > 0 ? this.editNickname.trim() : this.profile.nickname;
-    const updated: UserProfile = {
-      userId: this.profile.userId,
-      nickname,
-      phone: this.profile.phone,
-      hometown: this.editHometown.trim(),
-      dietaryRestrictions: this.profile.dietaryRestrictions,
-      tastePreferences: this.profile.tastePreferences,
-      cuisinePreferences: this.profile.cuisinePreferences,
-      personalizationEnabled: this.profile.personalizationEnabled
-    } as UserProfile;
-    this.isLoading = true;
-    this.notice = '';
-    try {
-      const user = await AuthApi.updateProfile(this.authToken, updated);
-      this.applyUser(user);
-      this.notice = '个人资料已保存';
-    } catch (error) {
-      this.notice = (error as Error).message;
-    } finally {
-      this.isLoading = false;
-    }
   }
 
   @Builder
@@ -176,12 +134,17 @@ export struct ProfilePage {
   private AccountCard() {
     Column({ space: 14 }) {
       Row({ space: 14 }) {
-        Column() {
-          Text(this.isLoggedIn() && this.profile.nickname.length > 0 ? this.profile.nickname.substring(0, 1) : '游')
-            .fontSize(25).fontWeight(FontWeight.Bold).fontColor(Color.White)
+        if (this.profile.avatarUrl.length > 0) {
+          Image(this.profile.avatarUrl)
+            .width(58).height(58).objectFit(ImageFit.Cover).borderRadius(29).clip(true)
+        } else {
+          Column() {
+            Text(this.isLoggedIn() && this.profile.nickname.length > 0 ? this.profile.nickname.substring(0, 1) : '游')
+              .fontSize(25).fontWeight(FontWeight.Bold).fontColor(Color.White)
+          }
+          .width(58).height(58).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
+          .backgroundColor(this.isLoggedIn() ? COLOR_PRIMARY : '#C7B8AF').borderRadius(29)
         }
-        .width(58).height(58).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Center)
-        .backgroundColor(this.isLoggedIn() ? COLOR_PRIMARY : '#C7B8AF').borderRadius(29)
 
         Column({ space: 5 }) {
           Text(this.isLoggedIn() ? (this.profile.nickname || '小艺用户') : '游客用户')
@@ -189,6 +152,9 @@ export struct ProfilePage {
           Text(this.isLoggedIn() ? (this.profile.phone.length > 0 ? this.profile.phone : '华为账号已登录') :
             '登录后同步个人资料与饮食偏好')
             .fontSize(12).fontColor(COLOR_MUTED)
+          if (this.isLoggedIn() && this.profile.hometown.length > 0) {
+            Text(`籍贯：${this.profile.hometown}`).fontSize(11).fontColor(COLOR_MUTED)
+          }
         }
         .alignItems(HorizontalAlign.Start).layoutWeight(1)
 
@@ -230,27 +196,11 @@ export struct ProfilePage {
 
           this.AccountCard()
 
-          if (this.isLoggedIn()) {
-            Column({ space: 12 }) {
-              Text('个人资料').fontSize(17).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT).width('100%')
-              TextInput({ text: this.editNickname, placeholder: '昵称' })
-                .height(46).backgroundColor('#FFFDFC').borderRadius(13)
-                .onChange((value: string) => this.editNickname = value)
-              TextInput({ text: this.editHometown, placeholder: '籍贯（选填）' })
-                .height(46).backgroundColor('#FFFDFC').borderRadius(13)
-                .onChange((value: string) => this.editHometown = value)
-              Button(this.isLoading ? '保存中…' : '保存个人资料')
-                .width('100%').height(44).enabled(!this.isLoading).fontColor(Color.White)
-                .backgroundColor(COLOR_PRIMARY).borderRadius(14).onClick(() => this.saveProfile())
-            }
-            .padding(16).backgroundColor(Color.White).borderRadius(20).width('100%')
-          }
-
           Column({ space: 15 }) {
             Row() {
               Column({ space: 3 }) {
-                Text('饮食偏好').fontSize(17).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
-                Text(this.isLoggedIn() ? '保存后会参与后续云端推荐' : '游客模式下仅用于当前运行')
+                Text('个人信息与偏好').fontSize(17).fontWeight(FontWeight.Bold).fontColor(COLOR_TEXT)
+                Text(this.isLoggedIn() ? '统一管理头像、资料和推荐偏好' : '游客模式下仅用于当前运行')
                   .fontSize(11).fontColor(COLOR_MUTED)
               }
               .alignItems(HorizontalAlign.Start).layoutWeight(1)
@@ -307,13 +257,13 @@ export struct ProfilePage {
   }
 
   build() {
-    if (this.showLogin) {
+    if (this.activeSubpage === 'login') {
       LoginPage({
         authToken: this.authToken,
         onBack: () => this.closeLogin(),
         onLoginSuccess: (user: AuthUser) => this.loginSucceeded(user)
       })
-    } else if (this.showPreferenceEditor) {
+    } else if (this.activeSubpage === 'profile') {
       PreferenceEditPage({
         profile: this.profile,
         authToken: this.authToken,

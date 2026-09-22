@@ -4,8 +4,10 @@ import { resolve } from 'node:path';
 import { SqliteStore } from './store.js';
 import { AmapPlaceProvider } from './amap.js';
 import { RestaurantOrchestrator } from './orchestrator.js';
-import { ChatModelProvider, VisionProvider } from './providers.js';
-import { createOtp, hashOtp, issueToken, sanitizeReview, verifyToken } from './security.js';
+import { ChatModelProvider, HuaweiAccountProvider, VisionProvider } from './providers.js';
+import {
+  createOtp, hashOtp, hashPassword, issueToken, sanitizeReview, verifyPassword, verifyToken
+} from './security.js';
 import { Telemetry } from './telemetry.js';
 
 function sendJson(response, statusCode, value, requestId, origin = '*') {
@@ -44,15 +46,47 @@ async function readJson(request, maxBytes = 8 * 1024 * 1024) {
   }
 }
 
+function publicReview(item) {
+  return {
+    id: item.id, rating: Number(item.rating) || 0, text: sanitizeReview(item.text ?? ''),
+    tags: Array.isArray(item.tags) ? item.tags : [], authorName: item.authorName ?? '匿名用户',
+    createdAt: item.updatedAt ?? item.createdAt
+  };
+}
+
 function publicRestaurant(restaurant, reviews = []) {
   return {
     ...restaurant,
     recommendationReason: restaurant.recommendationReason ?? '',
-    reviews: reviews.filter((item) => item.restaurantId === restaurant.id).map((item) => ({
-      id: item.id, rating: Number(item.rating) || 0, text: sanitizeReview(item.text ?? ''),
-      tags: Array.isArray(item.tags) ? item.tags : [], createdAt: item.updatedAt ?? item.createdAt
-    }))
+    reviews: reviews.filter((item) => item.restaurantId === restaurant.id)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .map(publicReview)
   };
+}
+
+function publicUser(user) {
+  const {
+    huaweiOpenId: _huaweiOpenId, huaweiUnionId: _huaweiUnionId,
+    passwordHash: _passwordHash, accountKey: _accountKey, ...value
+  } = user;
+  return { ...value, avatarUrl: String(value.avatarUrl ?? '') };
+}
+
+function normalizedAccount(value) {
+  return String(value ?? '').trim().toLocaleLowerCase('zh-CN');
+}
+
+function validatePasswordAccount(account, password) {
+  if (account.length < 3 || account.length > 40 || /\s/.test(account)) {
+    throw Object.assign(new Error('账号应为 3-40 位且不能包含空格'), {
+      statusCode: 400, code: 'INVALID_ACCOUNT'
+    });
+  }
+  if (String(password ?? '').length < 6 || String(password ?? '').length > 128) {
+    throw Object.assign(new Error('密码长度应为 6-128 位'), {
+      statusCode: 400, code: 'INVALID_PASSWORD'
+    });
+  }
 }
 
 function authorizedUser(request, state, config) {
@@ -93,7 +127,9 @@ export async function createRestaurantServer(options = {}) {
     amapDefaultRegion: options.amapDefaultRegion ?? process.env.AMAP_DEFAULT_REGION ?? '南京市',
     amapLocation: options.amapLocation ?? process.env.AMAP_LOCATION ?? '',
     amapRadiusMeters: options.amapRadiusMeters ?? process.env.AMAP_RADIUS_METERS ?? 5000,
-    amapCacheTtlSeconds: options.amapCacheTtlSeconds ?? process.env.AMAP_CACHE_TTL_SECONDS ?? 300
+    amapCacheTtlSeconds: options.amapCacheTtlSeconds ?? process.env.AMAP_CACHE_TTL_SECONDS ?? 300,
+    huaweiClientId: options.huaweiClientId ?? process.env.HUAWEI_CLIENT_ID ?? '',
+    huaweiClientSecret: options.huaweiClientSecret ?? process.env.HUAWEI_CLIENT_SECRET ?? ''
   };
   if (!config.demoMode && config.authSecret === 'development-secret-change-before-production') {
     throw new Error('生产环境必须配置强随机 AUTH_SECRET');
@@ -103,6 +139,7 @@ export async function createRestaurantServer(options = {}) {
   }).init();
   const chat = options.chatProvider ?? new ChatModelProvider(config, options.llmFetchImpl ?? globalThis.fetch);
   const telemetry = options.telemetry ?? new Telemetry();
+  const huaweiAccount = options.huaweiAccountProvider ?? new HuaweiAccountProvider(config);
   const orchestrator = new RestaurantOrchestrator(store, {
     vision: new VisionProvider(config),
     chat,
@@ -238,6 +275,116 @@ export async function createRestaurantServer(options = {}) {
         return;
       }
 
+      if (request.method === 'POST' && path === '/v1/auth/register') {
+        const body = await readJson(request);
+        const account = String(body.account ?? '').trim();
+        const accountKey = normalizedAccount(account);
+        const password = String(body.password ?? '');
+        const nickname = String(body.nickname ?? '').trim();
+        validatePasswordAccount(account, password);
+        if (!nickname || nickname.length > 40) {
+          throw Object.assign(new Error('请输入 1-40 位昵称'), { statusCode: 400, code: 'INVALID_NICKNAME' });
+        }
+        const user = await store.transaction((state) => {
+          if (state.users.some((item) => item.accountKey === accountKey ||
+            (item.phone && item.phone === account))) {
+            throw Object.assign(new Error('该账号已注册'), { statusCode: 409, code: 'ACCOUNT_EXISTS' });
+          }
+          const profile = {
+            id: randomUUID(), account, accountKey, passwordHash: hashPassword(password),
+            phone: /^1\d{10}$/.test(account) ? account : '', nickname, hometown: '', avatarUrl: '',
+            dietaryRestrictions: [], tastePreferences: ['清淡'], cuisinePreferences: [],
+            personalizationEnabled: true, authProvider: 'password',
+            deviceId: request.headers['x-device-id'] ?? '', createdAt: new Date().toISOString()
+          };
+          state.users.push(profile);
+          return profile;
+        });
+        sendJson(response, 201, {
+          token: issueToken(user, config.authSecret), user: publicUser(user)
+        }, requestId, origin);
+        return;
+      }
+
+      const restaurantReviewMatch = path.match(/^\/v1\/restaurants\/([^/]+)\/reviews$/);
+      if (request.method === 'POST' && restaurantReviewMatch) {
+        const body = await readJson(request);
+        const snapshot = store.snapshot();
+        const current = authorizedUser(request, snapshot, config);
+        const restaurantId = decodeURIComponent(restaurantReviewMatch[1]);
+        if (!snapshot.restaurants.some((item) => item.id === restaurantId)) {
+          throw Object.assign(new Error('餐厅不存在'), { statusCode: 404, code: 'RESTAURANT_NOT_FOUND' });
+        }
+        const text = sanitizeReview(String(body.text ?? ''));
+        if (!text) throw Object.assign(new Error('评论内容不能为空'), { statusCode: 400, code: 'INVALID_REVIEW' });
+        const rating = Math.min(Math.max(Number(body.rating) || 0, 1), 5);
+        const review = await store.transaction((state) => {
+          const created = {
+            id: randomUUID(), userId: current.id, authorName: current.nickname || '已登录用户',
+            restaurantId, sessionId: '', rating, text, tags: [], createdAt: new Date().toISOString()
+          };
+          state.reviews.push(created);
+          return created;
+        });
+        sendJson(response, 201, publicReview(review), requestId, origin);
+        return;
+      }
+
+      if (request.method === 'POST' && path === '/v1/auth/login') {
+        const body = await readJson(request);
+        const account = String(body.account ?? '').trim();
+        const password = String(body.password ?? '');
+        validatePasswordAccount(account, password);
+        const state = store.snapshot();
+        const user = state.users.find((item) => item.accountKey === normalizedAccount(account) ||
+          (item.phone && item.phone === account));
+        if (!user?.passwordHash || !verifyPassword(password, user.passwordHash)) {
+          throw Object.assign(new Error('账号或密码错误'), { statusCode: 401, code: 'INVALID_CREDENTIALS' });
+        }
+        await store.transaction((mutable) => {
+          const saved = mutable.users.find((item) => item.id === user.id);
+          saved.deviceId = request.headers['x-device-id'] ?? saved.deviceId ?? '';
+          saved.lastLoginAt = new Date().toISOString();
+          return true;
+        });
+        sendJson(response, 200, {
+          token: issueToken(user, config.authSecret), user: publicUser(user)
+        }, requestId, origin);
+        return;
+      }
+
+      if (request.method === 'POST' && path === '/v1/auth/huawei') {
+        const body = await readJson(request);
+        const identity = await huaweiAccount.exchangeAuthorizationCode(body.authorizationCode);
+        const user = await store.transaction((state) => {
+          let profile = state.users.find((item) => item.huaweiUnionId === identity.unionId);
+          if (!profile) profile = state.users.find((item) => item.huaweiOpenId === identity.openId);
+          if (!profile) {
+            profile = {
+              id: randomUUID(), phone: '', nickname: identity.nickname, hometown: '', avatarUrl: identity.avatarUrl,
+              dietaryRestrictions: [], tastePreferences: ['清淡'], cuisinePreferences: [],
+              personalizationEnabled: true, authProvider: 'huawei', huaweiOpenId: identity.openId,
+              huaweiUnionId: identity.unionId, deviceId: request.headers['x-device-id'] ?? '',
+              createdAt: new Date().toISOString()
+            };
+            state.users.push(profile);
+          } else {
+            profile.authProvider = 'huawei';
+            profile.huaweiOpenId = identity.openId;
+            profile.huaweiUnionId = identity.unionId;
+            profile.deviceId = request.headers['x-device-id'] ?? profile.deviceId ?? '';
+            if (identity.avatarUrl) profile.avatarUrl = identity.avatarUrl;
+            if (!profile.nickname && identity.nickname) profile.nickname = identity.nickname;
+            profile.updatedAt = new Date().toISOString();
+          }
+          return profile;
+        });
+        sendJson(response, 200, {
+          token: issueToken(user, config.authSecret), user: publicUser(user)
+        }, requestId, origin);
+        return;
+      }
+
       if (request.method === 'POST' && path === '/v1/auth/otp/request') {
         const body = await readJson(request);
         if (!/^1\d{10}$/.test(body.phone ?? '')) {
@@ -273,7 +420,7 @@ export async function createRestaurantServer(options = {}) {
           let profile = state.users.find((item) => item.phone === body.phone);
           if (!profile) {
             profile = {
-              id: randomUUID(), phone: body.phone, nickname: '新用户', hometown: '',
+              id: randomUUID(), phone: body.phone, nickname: '新用户', hometown: '', avatarUrl: '',
               dietaryRestrictions: [], tastePreferences: ['清淡'], cuisinePreferences: [],
               personalizationEnabled: true, deviceId: request.headers['x-device-id'] ?? '',
               createdAt: new Date().toISOString()
@@ -283,7 +430,13 @@ export async function createRestaurantServer(options = {}) {
           profile.deviceId = request.headers['x-device-id'] ?? profile.deviceId ?? '';
           return profile;
         });
-        sendJson(response, 200, { token: issueToken(user, config.authSecret), user }, requestId, origin);
+        sendJson(response, 200, { token: issueToken(user, config.authSecret), user: publicUser(user) }, requestId, origin);
+        return;
+      }
+
+      if (request.method === 'GET' && path === '/v1/users/me/profile') {
+        const state = store.snapshot();
+        sendJson(response, 200, publicUser(authorizedUser(request, state, config)), requestId, origin);
         return;
       }
 
@@ -295,6 +448,15 @@ export async function createRestaurantServer(options = {}) {
           const user = mutable.users.find((item) => item.id === current.id);
           user.nickname = String(body.nickname ?? '').trim().slice(0, 40);
           user.hometown = String(body.hometown ?? '').trim().slice(0, 40);
+          const avatarUrl = String(body.avatarUrl ?? user.avatarUrl ?? '').trim();
+          const inlineAvatar = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(avatarUrl);
+          const remoteAvatar = /^https:\/\/[^\s]+$/.test(avatarUrl);
+          if (avatarUrl.length > 2 * 1024 * 1024 || (avatarUrl && !inlineAvatar && !remoteAvatar)) {
+            throw Object.assign(new Error('头像格式无效或文件过大'), {
+              statusCode: 400, code: 'INVALID_AVATAR'
+            });
+          }
+          user.avatarUrl = avatarUrl;
           user.dietaryRestrictions = Array.isArray(body.dietaryRestrictions) ? body.dietaryRestrictions.slice(0, 20) : [];
           user.tastePreferences = Array.isArray(body.tastePreferences) ? body.tastePreferences.slice(0, 20) : [];
           user.cuisinePreferences = Array.isArray(body.cuisinePreferences) ? body.cuisinePreferences.slice(0, 20) : [];
@@ -302,7 +464,7 @@ export async function createRestaurantServer(options = {}) {
           user.updatedAt = new Date().toISOString();
           return user;
         });
-        sendJson(response, 200, profile, requestId, origin);
+        sendJson(response, 200, publicUser(profile), requestId, origin);
         return;
       }
 

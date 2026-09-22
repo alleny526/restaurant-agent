@@ -197,9 +197,16 @@ export class SqliteStore {
     const conditions = [];
     const values = [];
     if (query) {
-      conditions.push('(name LIKE ? OR address LIKE ? OR cuisines LIKE ? OR tags LIKE ?)');
+      conditions.push(`(
+        name LIKE ? OR address LIKE ? OR cuisines LIKE ? OR tags LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM menu_items menu_search
+          WHERE menu_search.restaurant_id = restaurants.id
+            AND (menu_search.name LIKE ? OR menu_search.ingredients LIKE ? OR menu_search.tags LIKE ?)
+        )
+      )`);
       const pattern = `%${query}%`;
-      values.push(pattern, pattern, pattern, pattern);
+      values.push(pattern, pattern, pattern, pattern, pattern, pattern, pattern);
     }
     if (cuisine) {
       conditions.push('cuisines LIKE ?');
